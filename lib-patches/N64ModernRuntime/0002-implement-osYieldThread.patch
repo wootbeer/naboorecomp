@@ -1,30 +1,36 @@
 diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
-index e0d367e..1d26bce 100644
+index e0d367e..dfc4eda 100644
 --- a/librecomp/src/ultra_translation.cpp
 +++ b/librecomp/src/ultra_translation.cpp
-@@ -28,9 +28,23 @@ extern "C" void osDestroyThread_recomp(uint8_t * rdram, recomp_context * ctx) {
+@@ -28,9 +28,29 @@ extern "C" void osDestroyThread_recomp(uint8_t * rdram, recomp_context * ctx) {
      osDestroyThread(rdram, (int32_t)ctx->r4);
  }
  
 +// Defined in ultramodern (mesgqueue.cpp, scheduling.cpp) without a header.
 +void dequeue_external_messages(uint8_t* rdram);
++void swap_to_thread(uint8_t* rdram, OSThread* to);
 +extern "C" void yield_self_1ms(uint8_t* rdram);
 +
-+// osYieldThread: let other ready threads of the same priority run. Battle for
-+// Naboo's idle thread loops on it, and the game spins on it while waiting.
-+// Game threads only switch at OS calls here, and only to a higher-priority
-+// thread, so: deliver any pending hardware events (waiting up to 1 ms for
-+// one, which also keeps an idle loop from burning a core), then briefly drop
-+// to priority 0 so a ready thread of the same priority gets a turn. Same
-+// approach as the BattleTanx: Global Assault port's busy-wait fix.
++// osYieldThread, as in libultra: hand the CPU to the next ready thread of the
++// same or higher priority. Battle for Naboo's idle thread loops on it, and
++// its file loader yields on every pass. The runtime's own scheduler only
++// ever switches to a strictly higher priority, so do the swap here. With
++// nothing else ready, wait up to 1 ms for an event instead, so an idle loop
++// doesn't burn a core.
  extern "C" void osYieldThread_recomp(uint8_t * rdram, recomp_context * ctx) {
 -    assert(false);
 -    // osYieldThread(rdram);
-+    yield_self_1ms(rdram);
 +    dequeue_external_messages(rdram);
-+    OSPri pri = osGetThreadPri(rdram, NULLPTR);
-+    osSetThreadPri(rdram, NULLPTR, 0);
-+    osSetThreadPri(rdram, NULLPTR, pri);
++    if (!ultramodern::thread_queue_empty(rdram, ultramodern::running_queue)) {
++        OSThread* next = TO_PTR(OSThread, ultramodern::thread_queue_peek(rdram, ultramodern::running_queue));
++        OSThread* self = TO_PTR(OSThread, ultramodern::this_thread());
++        if (next->priority >= self->priority) {
++            ultramodern::thread_queue_pop(rdram, ultramodern::running_queue);
++            swap_to_thread(rdram, next);
++            return;
++        }
++    }
++    yield_self_1ms(rdram);
  }
  
  extern "C" void osSetThreadPri_recomp(uint8_t* rdram, recomp_context* ctx) {

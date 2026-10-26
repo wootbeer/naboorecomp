@@ -6,13 +6,13 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 8)
+## Overview (as of round 10)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
-game's threads, the VI and the video mode, and the first ROM reads. It then
-stalls in its own file-loading thread (round 7). Nothing is drawn yet: the
-game uses Factor 5's own graphics microcode, which RT64 doesn't support.
+game's threads, the VI and the video mode, its file loader, the first audio
+buffers and its first graphics task. Nothing is drawn: the game uses Factor
+5's own graphics microcode, which RT64 doesn't support (round 10).
 
 **How the main areas got here** (the rounds to read for each):
 
@@ -30,6 +30,57 @@ game uses Factor 5's own graphics microcode, which RT64 doesn't support.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-26, round 10: the first graphics task, and GLideN64
+
+With round 9, the game gets through its file loading and on to its first
+graphics task (and two audio buffers). RT64 then reports "Unable to find a
+matching GBI in the current database. This game is not supported in HLE."
+and crashed in `Interpreter::processDisplayLists`, which assumes a GBI was
+found. `lib-patches/rt64/0022` skips the display lists instead, so the game
+keeps running with a black screen until the microcode is supported.
+
+Verified here (90 s under gdb, Xvfb and software Vulkan, so slow): no crash,
+and the game runs its main loop: 137 RSP tasks, 47 osViSwapBuffer, 93
+controller reads, 5,320 audio buffers (about one per VI), 9 ROM reads.
+
+**References for the microcode** (owner's pointers): GLideN64 implemented
+Factor 5's microcode for Indiana Jones and Battle for Naboo in 2018
+(github.com/gonetz/GLideN64 issue #1259, commit b0a5753, reverse engineered
+by olivieryuyu). The issue's microcode comparison found a section common to
+all three Factor 5 games and another only in Battle for Naboo and Indiana
+Jones, which agrees with round 5 (Naboo's dispatch tables are not where Rogue
+Squadron's are). GLideN64 is GPL-2.0 only, which can't be combined with this
+project's GPL-3.0 (or put into RT64, MIT), so its code can't be copied: it is
+a reference for what the commands do, for an implementation of our own.
+
+## 2026-10-26, round 9: the file loader (__osRunningThread)
+
+Round 7's stall, read from game memory (gdb, with the crash handler's RDRAM
+pointer, which this port never set before: `naboo_on_init` now does, so
+crash logs can also name N64 addresses).
+
+- The loader (`func_40004308`) had one request in slot 0 and was stuck
+  replying to it: `func_4000664C` retries a non-blocking osSendMesg until it
+  succeeds, and the reply went to a queue at address `0x2C`. The request's
+  sender field was 0.
+- The requester (`func_40004850`) fills that field from `func_40006780`,
+  which finds the current "process" by walking the game's process list
+  (`0x4007D9A4`, next at +0x1C) for the one whose thread (+0x48) is
+  `__osRunningThread` (libultra's variable at `0x4004ECD0`). The runtime
+  switches threads itself and never wrote that variable, so it was 0.
+- The game reads `__osRunningThread` in about 40 of its own functions.
+
+**Fix** (`lib-patches/N64ModernRuntime/0004`): the runtime can be given the
+address of the game's `__osRunningThread`
+(`ultramodern::set_running_thread_address`) and writes the running thread
+there whenever a game thread resumes. `naboo_on_init` sets `0x4004ECD0`.
+
+Also, `osYieldThread` (round 6) now does what libultra's does: switch to the
+next ready thread of the same or higher priority (the runtime's scheduler
+only switches to a higher one), and only wait for an event when there is
+none. This wasn't the cause of the stall, but the old version never let a
+thread of the same priority run.
 
 ## 2026-10-26, round 8: the window wouldn't close
 

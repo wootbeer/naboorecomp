@@ -22,8 +22,9 @@ tooling as the BattleTanx: Global Assault port.
 - **Boot**: the launcher with the ROM picker (and the hash check for this
   release), then the game's own boot: `osInitialize` (with the clock-rate
   scaling the BattleTanx port had to find in its round 138), the memory
-  setup, all of the game's threads, VI events, the video mode and the first
-  ROM reads. It then stalls in the game's file loader (STATUS.md round 7).
+  setup, all of the game's threads, VI events, the video mode, the game's
+  file loader, and on into its main loop (graphics and audio tasks, frame
+  swaps, controller reads). The screen stays black: see Graphics below.
 - **Audio microcode**: MusyX located and run through RSPRecomp (first pass).
 
 ## Not working yet
@@ -47,11 +48,13 @@ tooling as the BattleTanx: Global Assault port.
 
 ## Next
 
-1. The file loader stall (STATUS.md round 7).
-2. Factor 5 graphics microcode in RT64 (study the Rogue Squadron fork, find
-   where Battle for Naboo's differs).
-3. MusyX audio microcode layout.
-4. Boot to the title screen, then menus and the first mission.
+1. Factor 5 graphics microcode in RT64. References: GLideN64's
+   implementation of the Indiana Jones / Battle for Naboo microcode (issue
+   #1259; GPL-2.0, so for how the commands work, not for code) and the
+   Rogue Squadron RT64 fork (an earlier version of the microcode).
+2. MusyX audio microcode layout.
+3. The in-game quit prompt and UI (the per-frame UI pump).
+4. Title screen, menus and the first mission.
 
 ## Where things are
 

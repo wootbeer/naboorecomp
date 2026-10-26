@@ -11,6 +11,7 @@
 #include "librecomp/game.hpp"
 #include "librecomp/helpers.hpp"
 #include "recomp.h"
+#include "ultramodern/ultramodern.hpp"
 
 extern "C" void load_overlays(uint32_t rom, int32_t ram_addr, uint32_t size);
 extern "C" void unload_overlays(int32_t ram_addr, uint32_t size);
@@ -23,7 +24,18 @@ namespace {
     constexpr uint32_t paged_size = 0xDA390;
 }
 
+// src/main/crash_handler.cpp: lets crash reports turn host addresses into N64 ones.
+extern "C" void naboo_crash_note_rdram(uint8_t* rdram);
+
 void naboo_on_init(uint8_t* rdram, recomp_context*) {
+    naboo_crash_note_rdram(rdram);
+
+    // The game reads libultra's __osRunningThread (0x4004ECD0) itself, about
+    // 40 places, e.g. to find the current process (func_40006780). The
+    // runtime switches threads on its own, so it keeps the variable up to
+    // date (lib-patches/N64ModernRuntime/0004, STATUS.md round 9).
+    ultramodern::set_running_thread_address((int32_t)0x4004ECD0);
+
     // The runtime registered every section in the first MB of ROM as if
     // IPL3 had loaded it there, which puts .paged's functions at
     // 0x4006E770 (inside .main's BSS). Move them to their real address so

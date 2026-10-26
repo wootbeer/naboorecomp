@@ -1,0 +1,17 @@
+diff --git a/src/hle/rt64_interpreter.cpp b/src/hle/rt64_interpreter.cpp
+index dccaa87..e75e196 100644
+--- a/src/hle/rt64_interpreter.cpp
++++ b/src/hle/rt64_interpreter.cpp
+@@ -154,7 +154,11 @@ namespace RT64 {
+     }
+ 
+     void Interpreter::processDisplayLists(uint32_t dlStartAdddress, DisplayList *dlStart) {
+-        assert(hleGBI != nullptr);
++        // No HLE support for this game's microcode (already reported when it was
++        // detected): skip its display lists instead of crashing.
++        if (hleGBI == nullptr) {
++            return;
++        }
+ 
+         state->dlCpuProfiler.start();
+ 
