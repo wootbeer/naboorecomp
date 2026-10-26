@@ -1,0 +1,202 @@
+# N64Recomp config for Star Wars Episode I: Battle for Naboo (USA).
+# See STATUS.md for how each entry was found.
+
+[input]
+# The boot stub at ROM 0x1000 (linked at 0x40000400, run from 0x80000400 by
+# IPL3): sets the stack, maps the TLB and jumps to main() (func_4003A4DC).
+# Its TLB setup is patched out below (STATUS.md round 4).
+entrypoint = 0x40000400
+output_func_path = "RecompiledFuncs"
+rom_file_path = "Battle for Naboo (USA).z64"
+symbols_file_path = "NabooSyms/naboo.us.rev0.syms.toml"
+# Factor 5's vector math sets the FR bit in Status (e.g. func_41002400) to use
+# all 32 FPU registers as doubles, then clears it again (STATUS.md round 4).
+uses_mips3_float_mode = true
+
+[patches]
+# TLB setup: the port has no TLB, its address masking stands in for the two
+# mappings (lib-patches/N64Recomp, STATUS.md round 4).
+stubs = ["func_40000880", "func_40000F08",
+    # The TLB-miss handler (demand paging of the 0x41000000 segment) and the
+    # code that installs it at the exception vectors.
+    "func_400008F4",
+    # In .data: allocates the data cache's lines over a buffer (cache 0x0D) so
+    # a following DMA doesn't read memory first. Nothing to do on a host.
+    "func_4004E880",
+    # libultra's osInitialize, never called (main() calls Factor 5's copy,
+    # 0x4003A108, which the runtime replaces), STATUS.md round 5.
+    "func_400408C0"]
+ignored = []
+
+# main() right after its osInitialize call: what the game's own osInitialize
+# sets up besides the hardware (osClockRate * 3/4, osViClock), which the
+# runtime's replacement doesn't do (src/game/os_init.cpp, STATUS.md round 5).
+[[patches.hook]]
+func = "func_4003A4DC"
+before_vram = 0x4003A504
+text = "    { extern void naboo_init_os(uint8_t *rdram); naboo_init_os(rdram); }"
+
+# Boot stub: no COP0 (Wired, Context, Index), and fall through to its
+# `j func_4003A4DC` at 0x4000044C instead of jumping there through the
+# TLB-mapped address in $t0.
+[[patches.instruction]]
+func = "recomp_entrypoint"
+vram = 0x4000040C
+value = 0x00000000
+
+[[patches.instruction]]
+func = "recomp_entrypoint"
+vram = 0x40000410
+value = 0x00000000
+
+[[patches.instruction]]
+func = "recomp_entrypoint"
+vram = 0x4000041C
+value = 0x00000000
+
+[[patches.instruction]]
+func = "recomp_entrypoint"
+vram = 0x40000444
+value = 0x00000000
+
+# cache instructions (no caches to manage on a host; func_40000F50 is a bzero
+# that allocates each line before zeroing it), STATUS.md round 4.
+
+[[patches.instruction]]
+func = "func_40000F50"
+vram = 0x40000F60
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400236E4"
+vram = 0x400236EC
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400236E4"
+vram = 0x400236F0
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400236E4"
+vram = 0x400236F4
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400236E4"
+vram = 0x400236F8
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400237D8"
+vram = 0x40023838
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_40023880"
+vram = 0x400238BC
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_400238F8"
+vram = 0x40023950
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_40023D5C"
+vram = 0x40023E70
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_40023D5C"
+vram = 0x40023E8C
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_40023D5C"
+vram = 0x40023E90
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_41014660"
+vram = 0x41014670
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_41014660"
+vram = 0x41014674
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_41014F70"
+vram = 0x41014FA0
+value = 0x00000000
+
+[[patches.instruction]]
+func = "func_41014F70"
+vram = 0x41014FD8
+value = 0x00000000
+
+# The hand-written routines at the end of .paged read tables placed after their
+# code through the return address of a `bltzal $zero` (never taken, but it
+# links). Each becomes a lui/addiu of that same address (STATUS.md round 4).
+
+[[patches.instruction]]
+func = "func_410D9D30"
+vram = 0x410D9D40
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410D9D30"
+vram = 0x410D9D44
+value = 0x27FF9D48
+
+[[patches.instruction]]
+func = "func_410D9E24"
+vram = 0x410D9E4C
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410D9E24"
+vram = 0x410D9E50
+value = 0x27FF9E54
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA104
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA108
+value = 0x27FFA10C
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA128
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA12C
+value = 0x27FFA130
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA14C
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA150
+value = 0x27FFA154
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA170
+value = 0x3C1F410E
+
+[[patches.instruction]]
+func = "func_410DA0A4"
+vram = 0x410DA174
+value = 0x27FFA178

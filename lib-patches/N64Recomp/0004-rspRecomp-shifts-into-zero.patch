@@ -1,0 +1,38 @@
+diff --git a/RSPRecomp/src/rsp_recomp.cpp b/RSPRecomp/src/rsp_recomp.cpp
+index 518477d..a002eda 100644
+--- a/RSPRecomp/src/rsp_recomp.cpp
++++ b/RSPRecomp/src/rsp_recomp.cpp
+@@ -423,18 +423,33 @@ bool process_instruction(size_t instr_index, const std::vector<rabbitizer::Instr
+             print_line("{}{} = {}{} ^ {}", ctx_gpr_prefix(rt), rt, ctx_gpr_prefix(rs), rs, unsigned_imm_string);
+             break;
+         case InstrId::rsp_sll:
++            if (rd == 0) {
++                // A nop with a non-zero encoding (data in the text, for one).
++                fmt::print(output_file, "\n");
++                break;
++            }
+             print_line("{}{} = S32({}{}) << {}", ctx_gpr_prefix(rd), rd, ctx_gpr_prefix(rt), rt, sa);
+             break;
+         case InstrId::rsp_sllv:
+             print_line("{}{} = S32({}{}) << ({}{} & 31)", ctx_gpr_prefix(rd), rd, ctx_gpr_prefix(rt), rt, ctx_gpr_prefix(rs), rs);
+             break;
+         case InstrId::rsp_sra:
++            if (rd == 0) {
++                // A nop with a non-zero encoding (data in the text, for one).
++                fmt::print(output_file, "\n");
++                break;
++            }
+             print_line("{}{} = S32(RSP_SIGNED({}{}) >> {})", ctx_gpr_prefix(rd), rd, ctx_gpr_prefix(rt), rt, sa);
+             break;
+         case InstrId::rsp_srav:
+             print_line("{}{} = S32(RSP_SIGNED({}{}) >> ({}{} & 31))", ctx_gpr_prefix(rd), rd, ctx_gpr_prefix(rt), rt, ctx_gpr_prefix(rs), rs);
+             break;
+         case InstrId::rsp_srl:
++            if (rd == 0) {
++                // A nop with a non-zero encoding (data in the text, for one).
++                fmt::print(output_file, "\n");
++                break;
++            }
+             print_line("{}{} = S32(U32({}{}) >> {})", ctx_gpr_prefix(rd), rd, ctx_gpr_prefix(rt), rt, sa);
+             break;
+         case InstrId::rsp_srlv:

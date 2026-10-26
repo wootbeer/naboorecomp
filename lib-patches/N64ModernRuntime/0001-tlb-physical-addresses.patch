@@ -1,0 +1,45 @@
+diff --git a/librecomp/include/librecomp/addresses.hpp b/librecomp/include/librecomp/addresses.hpp
+index b1b50cb..0af5edb 100644
+--- a/librecomp/include/librecomp/addresses.hpp
++++ b/librecomp/include/librecomp/addresses.hpp
+@@ -17,7 +17,8 @@ namespace recomp {
+     constexpr int32_t flash_handle_end = (int32_t)(flash_handle + sizeof(OSPiHandle));
+     constexpr int32_t patch_rdram_start = 0x80801000;
+     static_assert(patch_rdram_start >= flash_handle_end);
+-    constexpr int32_t mod_rdram_start = 0x81000000;
++    // Physical 0x01000000 up holds Battle for Naboo's paged code segment (0x41000000).
++    constexpr int32_t mod_rdram_start = 0x82000000;
+ 
+     // Flashram occupies the same physical address as sram, but that issue is avoided because libultra exposes
+     // a high-level interface for flashram. Because that high-level interface is reimplemented, low level accesses
+diff --git a/ultramodern/include/ultramodern/ultra64.h b/ultramodern/include/ultramodern/ultra64.h
+index 31eb106..4a555c1 100644
+--- a/ultramodern/include/ultramodern/ultra64.h
++++ b/ultramodern/include/ultramodern/ultra64.h
+@@ -39,7 +39,9 @@ typedef uint8_t u8;
+ #  define RDRAM_ARG1 uint8_t *rdram
+ #  define PASS_RDRAM rdram, 
+ #  define PASS_RDRAM1 rdram
+-#  define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)var - 0xFFFFFFFF80000000]))
++// Physical offset of any game address (KSEG0, KSEG1 or Battle for Naboo's TLB
++// windows at 0x40000000/0x41000000), as in N64Recomp's recomp.h.
++#  define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)(var) & 0x1FFFFFFFULL]))
+ #  define GET_MEMBER(type, addr, member) (addr + (intptr_t)&(((type*)nullptr)->member))
+ #  ifdef __cplusplus
+ #    define NULLPTR (PTR(void))0
+diff --git a/ultramodern/src/misc_ultra.cpp b/ultramodern/src/misc_ultra.cpp
+index 31fb226..7117ec1 100644
+--- a/ultramodern/src/misc_ultra.cpp
++++ b/ultramodern/src/misc_ultra.cpp
+@@ -15,8 +15,9 @@ u32 osVirtualToPhysical(PTR(void) addr) {
+     } else if (IS_KSEG1(addr_val)) {
+         return K1_TO_PHYS(addr_val);
+     } else {
+-        // TODO handle TLB mappings
+-        return (u32)addr_val;
++        // Battle for Naboo's TLB windows map 0x40000000 onto physical 0 and
++        // 0x41000000 onto the paged code the port preloads at 0x01000000.
++        return (u32)addr_val & 0x1FFFFFFF;
+     }
+ }
+ 

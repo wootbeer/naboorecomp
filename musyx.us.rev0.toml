@@ -1,0 +1,13 @@
+# Battle for Naboo's RSP audio microcode (Factor 5's MusyX), recompiled by
+# N64Recomp's RSPRecomp. STATUS.md round 5.
+#
+# The audio task (func_40035340) uses Factor 5's RSP boot (0x40001080,
+# 0xD0 bytes) with ucode 0x4003D210 / 0x1000 bytes and ucode data
+# 0x4004E9D0 / 0x800 bytes. The boot loads the text to IMEM 0x80 and starts
+# it at 0x1080, as the runtime does. ROM offset = vram - 0x40000400 + 0x1000.
+text_offset = 0x3DE10
+text_size = 0xF80
+text_address = 0x04001080
+rom_file_path = "Battle for Naboo (USA).z64"
+output_file_path = "rsp/musyx.cpp"
+output_function_name = "musyx_audio"

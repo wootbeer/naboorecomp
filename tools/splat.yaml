@@ -1,0 +1,48 @@
+name: Battle for Naboo (USA)
+sha1: e4441a6eeb67861408c2e009baae8aad4df34021
+options:
+  basename: naboo
+  target_path: baserom.z64
+  base_path: .
+  compiler: GCC
+  find_file_boundaries: True
+  header_encoding: ASCII
+  platform: n64
+  asm_path: asm
+  src_path: src
+  build_path: build
+  extensions_path: tools/splat_ext
+  symbol_addrs_path: symbol_addrs.txt
+  undefined_funcs_auto_path: undefined_funcs_auto.txt
+  undefined_syms_auto_path: undefined_syms_auto.txt
+  disasm_unknown: True
+  libultra_symbols: True
+  hardware_regs: True
+  create_undefined_funcs_auto: True
+  create_undefined_syms_auto: True
+segments:
+  - name: header
+    type: header
+    start: 0x0
+  - name: boot
+    type: bin
+    start: 0x40
+  - name: main
+    type: code
+    start: 0x1000
+    vram: 0x40000400
+    bss_size: 0x38D70
+    subsegments:
+      - [0x1000, asm]
+      - [0x4C2D0, data]
+      - { start: 0x6F370, type: bss, vram: 0x4006E770 }
+  - name: paged
+    type: code
+    start: 0x6F370
+    vram: 0x41000000
+    subsegments:
+      - [0x6F370, asm]
+      - [0x1496A0, data]
+  - type: bin
+    start: 0x149700
+  - [0x2000000]

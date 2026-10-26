@@ -1,0 +1,38 @@
+diff --git a/src/analysis.cpp b/src/analysis.cpp
+index 9eaaa30..fc899c6 100644
+--- a/src/analysis.cpp
++++ b/src/analysis.cpp
+@@ -314,14 +314,29 @@ bool N64Recomp::analyze_function(const N64Recomp::Context& context, const N64Rec
+             end_address = stats.jump_tables[i + 1].vram;
+         }
+ 
+-        // TODO this assumes that the jump table is in the same section as the function itself
+-        cur_jtbl.rom = cur_jtbl.vram + func.rom - func.vram;
++        // The jump table can be in another section than the function (Battle for Naboo's
++        // paged code keeps its jump tables in the main segment's data), so find the
++        // section that holds it, falling back to the function's own.
++        uint32_t jtbl_rom_base = func.rom;
++        uint32_t jtbl_vram_base = func.vram;
+         cur_jtbl.section_index = func.section_index;
++        for (size_t section_index = 0; section_index < context.sections.size(); section_index++) {
++            const Section& jtbl_section = context.sections[section_index];
++            if (cur_jtbl.vram >= jtbl_section.ram_addr && cur_jtbl.vram < jtbl_section.ram_addr + jtbl_section.size) {
++                jtbl_rom_base = jtbl_section.rom_addr;
++                jtbl_vram_base = jtbl_section.ram_addr;
++                cur_jtbl.section_index = (uint16_t)section_index;
++                break;
++            }
++        }
++        cur_jtbl.rom = cur_jtbl.vram + jtbl_rom_base - jtbl_vram_base;
+ 
+         while (vram < end_address) {
+             // Retrieve the current entry of the jump table
+-            // TODO same as above
+-            uint32_t rom_addr = vram + func.rom - func.vram;
++            uint32_t rom_addr = vram + jtbl_rom_base - jtbl_vram_base;
++            if (rom_addr + sizeof(uint32_t) > context.rom.size()) {
++                break;
++            }
+             uint32_t jtbl_word = byteswap(*reinterpret_cast<const uint32_t*>(&context.rom[rom_addr]));
+ 
+             if (cur_jtbl.got_offset.has_value() && got_ram_addr.has_value()) {

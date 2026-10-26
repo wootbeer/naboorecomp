@@ -1,0 +1,19 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 17d7a47..4ad854b 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -73,7 +73,13 @@ static struct {
+             ViState* next_state = get_next_state();
+             const OSViMode* next_mode = next_state->mode;
+             if (next_mode == nullptr) {
+-                // Skip the update if the next mode hasn't been set yet.
++                // Skip the update if the next mode hasn't been set yet, but still take the
++                // event queue: the hardware raises VI interrupts whatever the mode, and a game
++                // can wait for one before it sets a mode (Battle for Naboo's boot does).
++                ViState* cur = get_cur_state();
++                cur->mq = next_state->mq;
++                cur->msg = next_state->msg;
++                cur->retrace_count = next_state->retrace_count;
+                 return;
+             }
+ 

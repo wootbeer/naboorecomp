@@ -1,0 +1,30 @@
+diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
+index e0d367e..1d26bce 100644
+--- a/librecomp/src/ultra_translation.cpp
++++ b/librecomp/src/ultra_translation.cpp
+@@ -28,9 +28,23 @@ extern "C" void osDestroyThread_recomp(uint8_t * rdram, recomp_context * ctx) {
+     osDestroyThread(rdram, (int32_t)ctx->r4);
+ }
+ 
++// Defined in ultramodern (mesgqueue.cpp, scheduling.cpp) without a header.
++void dequeue_external_messages(uint8_t* rdram);
++extern "C" void yield_self_1ms(uint8_t* rdram);
++
++// osYieldThread: let other ready threads of the same priority run. Battle for
++// Naboo's idle thread loops on it, and the game spins on it while waiting.
++// Game threads only switch at OS calls here, and only to a higher-priority
++// thread, so: deliver any pending hardware events (waiting up to 1 ms for
++// one, which also keeps an idle loop from burning a core), then briefly drop
++// to priority 0 so a ready thread of the same priority gets a turn. Same
++// approach as the BattleTanx: Global Assault port's busy-wait fix.
+ extern "C" void osYieldThread_recomp(uint8_t * rdram, recomp_context * ctx) {
+-    assert(false);
+-    // osYieldThread(rdram);
++    yield_self_1ms(rdram);
++    dequeue_external_messages(rdram);
++    OSPri pri = osGetThreadPri(rdram, NULLPTR);
++    osSetThreadPri(rdram, NULLPTR, 0);
++    osSetThreadPri(rdram, NULLPTR, pri);
+ }
+ 
+ extern "C" void osSetThreadPri_recomp(uint8_t* rdram, recomp_context* ctx) {
