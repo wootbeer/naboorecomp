@@ -11,6 +11,8 @@
 // customization (the library's default_launcher_init_callback runs).
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cinttypes>
@@ -19,6 +21,7 @@
 #include <filesystem>
 #include <exception>
 #include <string>
+#include <thread>
 
 #include "nfd.h"
 
@@ -149,6 +152,40 @@ static void set_window_icon(SDL_Window* window) {
 #endif
 }
 
+// Closing the window. In game, the frontend answers the first close with
+// its quit prompt, which needs the game to keep its frames and UI going; and
+// a confirmed quit waits for the game's threads, which can be stuck. So a
+// second close request exits at once, and once a quit has begun the process
+// exits if it hasn't finished within a few seconds.
+extern std::atomic_bool exited; // librecomp: set by ultramodern::quit()
+
+static int SDLCALL close_watch(void*, SDL_Event* event) {
+    static std::atomic_int close_requests = 0;
+    static std::atomic_bool watchdog_started = false;
+    bool close = event->type == SDL_QUIT ||
+        (event->type == SDL_WINDOWEVENT && event->window.event == SDL_WINDOWEVENT_CLOSE);
+    if (!close) {
+        return 1;
+    }
+    if (++close_requests >= 2) {
+        fflush(stdout);
+        fflush(stderr);
+        std::_Exit(EXIT_SUCCESS);
+    }
+    if (!watchdog_started.exchange(true)) {
+        std::thread([] {
+            while (!exited.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            fflush(stdout);
+            fflush(stderr);
+            std::_Exit(EXIT_SUCCESS);
+        }).detach();
+    }
+    return 1;
+}
+
 static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
 
     uint32_t flags = SDL_WINDOW_RESIZABLE;
@@ -166,6 +203,7 @@ static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callba
         exit_error("Failed to create window: %s", SDL_GetError());
     }
     set_window_icon(window);
+    SDL_AddEventWatch(close_watch, nullptr);
 
 #if defined(_WIN32)
     SDL_SysWMinfo wm_info;

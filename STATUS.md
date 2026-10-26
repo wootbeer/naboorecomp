@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 7)
+## Overview (as of round 8)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -30,6 +30,22 @@ game uses Factor 5's own graphics microcode, which RT64 doesn't support.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-26, round 8: the window wouldn't close
+
+**Report (owner, Windows):** black screen, and the window couldn't be closed.
+
+In game, the frontend answers a close with its quit prompt, which is drawn
+and run by the per-frame UI pump. The BattleTanx port calls that pump from
+the game's VI-swap function (a patch in `patches/`, its round 61); this port
+has no such patch yet, and the game is stalled anyway (round 7), so the
+prompt never showed and the close did nothing. A confirmed quit also waits
+for the game's threads, which can be stuck.
+
+**Fix** (`src/main/main.cpp`, `close_watch`): a second close request exits at
+once, and once a quit has begun the process exits if it hasn't finished
+within 3 seconds. Verified here: the first close (SIGINT, which SDL turns
+into the same quit event) leaves the game running, the second ends it.
 
 ## 2026-10-26, round 7: VI events, and the file-loading thread
 
