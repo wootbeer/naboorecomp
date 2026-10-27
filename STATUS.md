@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 13)
+## Overview (as of round 14)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -14,8 +14,9 @@ game's threads, the VI and the video mode, its file loader, audio, and on
 into its title screen and first 3D scenes, now running without crashing and
 with the same game state as on an emulator (round 13). RT64 recognises
 Factor 5's graphics microcode and runs its display lists (triangles,
-matrices, lighting, text rectangles); the picture isn't right yet: the
-window shows white, the next thing to fix (round 13, "Next").
+matrices, lighting, text rectangles), and the splash screen and the first
+3D scene's models show (round 14). The terrain and backgrounds the
+microcode generates itself (commands `05`/`BE`) are next.
 
 **How the main areas got here** (the rounds to read for each):
 
@@ -39,6 +40,31 @@ window shows white, the next thing to fix (round 13, "Next").
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-27, round 14: 3D models show; a Windows-only crash
+
+Tested on Windows after round 13: the splash screen's 2D parts showed, the
+rotating 3D Controller Pak didn't, then the game crashed with an uncaught
+`ultramodern::thread_terminated`.
+
+**No 3D.** RT64 draws with `world = MVP * inverse(projection) * projection`
+when a combined matrix is forced, and the projection stack starts each task
+as an all-zero matrix (`RSP::reset`). Battle for Naboo never loads a
+projection of its own (its matrices are all combined), so every vertex came
+out invalid on the GPU, while the CPU-side screen positions logged in round
+13 looked right. The module now sets an identity projection at the start of
+each display list (`lib-patches/rt64/0023`). The first 3D scene's models
+now draw; its background and terrain (commands `05`/`BE`) don't yet.
+
+**The crash.** The runtime ends a destroyed game thread by throwing
+`thread_terminated` through the recompiled code and libultra's
+`extern "C"` functions back to the thread's start. With CMake's default
+`/EHsc`, clang-cl treats `extern "C"` functions as never throwing, so it can
+drop that `catch`, and the exception ends the program (the log's
+`func_4003EA30` is `osEepromLongRead`, the last game function on the stack;
+the game creates and destroys loader threads around then). Linux compilers
+don't make that assumption, which is why it didn't show here. The build now
+uses `/EHs` (`CMakeLists.txt`).
 
 ## 2026-10-27, round 13: the graphics microcode in RT64; a symbol cut short
 

@@ -30,10 +30,9 @@ tooling as the BattleTanx: Global Assault port.
 ## Not working yet
 
 - **Graphics**: RT64 now recognises Factor 5's graphics microcode and runs
-  its display lists (triangles, matrices, lighting, text rectangles), but
-  the window shows white: the game's custom interlaced video mode needs
-  looking at. The terrain the microcode generates itself (commands 05/BE)
-  isn't drawn yet.
+  its display lists: 2D screens and 3D models show. The terrain and
+  backgrounds the microcode generates itself (commands 05/BE) aren't drawn
+  yet.
 - **Audio**: MusyX's code is longer than the RSP's instruction memory and
   wraps around; the RSPRecomp config needs that layout and its jump targets.
 - **Saves**: EEPROM through the runtime (AllowAll, 16 Kbit); not tried yet.
@@ -49,8 +48,8 @@ tooling as the BattleTanx: Global Assault port.
 
 ## Next
 
-1. Graphics: the video mode (white screen), then the terrain commands
-   (05/BE) of Factor 5's microcode.
+1. Graphics: the terrain and background commands (05/BE) of Factor 5's
+   microcode.
 2. MusyX audio microcode layout.
 3. The in-game quit prompt and UI (the per-frame UI pump).
 4. Title screen, menus and the first mission.

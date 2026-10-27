@@ -82,10 +82,10 @@ index 69c35d2..538d0b5 100644
          GBIFlags flags;
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
 new file mode 100644
-index 0000000..537b133
+index 0000000..457ba8a
 --- /dev/null
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
-@@ -0,0 +1,919 @@
+@@ -0,0 +1,930 @@
 +//
 +// RT64
 +//
@@ -187,6 +187,17 @@ index 0000000..537b133
 +            for (uint32_t address : clearedWords) {
 +                dmemWord(address) = 0;
 +            }
++
++            // The microcode only ever takes the combined model-view-projection matrix (forced
++            // through RSP::forceMatrixFromData), so the projection RT64 composes with is the identity.
++            RSP *rsp = state->rsp.get();
++            const hlslpp::float4x4 identity = hlslpp::float4x4::identity();
++            rsp->viewMatrixStack[0] = identity;
++            rsp->projMatrixStack[0] = identity;
++            rsp->viewProjMatrixStack[0] = identity;
++            rsp->invViewProjMatrixStack[0] = identity;
++            rsp->projectionMatrixInversed = true;
++            rsp->projectionMatrixChanged = true;
 +
 +            // The task's display list starts with a chunk header.
 +            nextChunkStack.clear();

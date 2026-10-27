@@ -27,6 +27,15 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "M
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-everything /W4")
 endif()
 
+# /EHs instead of CMake's default /EHsc: with "c", extern "C" functions are
+# assumed never to throw, but the runtime ends a destroyed game thread by
+# throwing through the recompiled code and libultra's extern "C" functions,
+# and the compiler may then drop the catch, ending the whole program
+# (STATUS.md round 14). Set before the submodules so they get it too.
+if (MSVC)
+    string(REPLACE "/EHsc" "/EHs" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+endif()
+
 # Keep the build machine's folders (e.g. the Windows user name) out of the
 # binaries: source paths that end up in them, through __FILE__ in asserts and
 # log messages or in debug info, are made relative to the repo root. Both
