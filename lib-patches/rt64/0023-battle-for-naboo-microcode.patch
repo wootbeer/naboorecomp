@@ -1,0 +1,1155 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bca9ac1..cd16f1c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -328,6 +328,7 @@ set (SOURCES
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex2.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dgolden.cpp"
++    "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dnaboo.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dpd.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dwave.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dzex2.cpp"
+diff --git a/src/gbi/rt64_gbi.cpp b/src/gbi/rt64_gbi.cpp
+index 7006549..f8f8cc5 100644
+--- a/src/gbi/rt64_gbi.cpp
++++ b/src/gbi/rt64_gbi.cpp
+@@ -10,6 +10,7 @@
+ #include "rt64_gbi_extended.h"
+ #include "rt64_gbi_f3d.h"
+ #include "rt64_gbi_f3dgolden.h"
++#include "rt64_gbi_f3dnaboo.h"
+ #include "rt64_gbi_f3dpd.h"
+ #include "rt64_gbi_f3dex.h"
+ #include "rt64_gbi_f3dex2.h"
+@@ -60,6 +61,7 @@ namespace RT64 {
+     const GBIInstance   F3D_WAYNE                 = { "2.0D, 04-01-96 (F3D WG 3D Hockey)",         GBIUCode::F3D,         { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   F3D_GOLDEN                = { "SW Version: 2.0G, 09-30-96 (GE007)",        GBIUCode::F3DGOLDEN,   { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   F3D_PD                    = { "SW Version: Unknown (PD)",                  GBIUCode::F3DPD,       { false,  false,  false,  false,  false } };
++    const GBIInstance   F3D_NABOO                 = { "Factor 5 (Battle for Naboo)",               GBIUCode::F3DNABOO,    { false,  false,  false,  false,  false } };
+     const GBIInstance   F3D_WAVE                  = { "SW Version: 2.0D, 04-01-96 (Wave Race)",    GBIUCode::F3DWAVE,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   F3DEX_0_95                = { "F3DEX 0.95",                                GBIUCode::F3DEX,       { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   F3DLX_0_95                = { "F3DLX 0.95",                                GBIUCode::F3DEX,       { true,   false,  false,  false,  false } }; // Needs confirmation.
+@@ -160,7 +162,8 @@ namespace RT64 {
+     // 
+     //                  Length      Hash                    Known instances               
+     //     
+-    static std::array<GBISegment, 94> textSegments = {
++    static std::array<GBISegment, 95> textSegments = {
++            GBISegment{ 0x1000,     0x4B79F85075B03B40ULL,  { &F3D_NABOO } },
+             GBISegment{ 0x1408,     0x9C0926F5E466BE70ULL,  { &F3D_SDK_E } }, // Needs confirmation.
+             GBISegment{ 0x1400,     0x34EAA6E921BCF1B2ULL,  { &F3D_SDK_F, &F3D_SDK_UNKNOWN_G, &F3D_SDK_UNKNOWN_H } }, // Needs confirmation.
+             GBISegment{ 0x1408,     0x3E05E9BBE814C700ULL,  { &F3D_FIFO_SDK_E } }, // Needs confirmation.
+@@ -257,7 +260,8 @@ namespace RT64 {
+             GBISegment{ 0x10B0,     0xE8028E4BC6529E6EULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
+     };
+ 
+-    static std::array<GBISegment, 105> dataSegments = {
++    static std::array<GBISegment, 106> dataSegments = {
++            GBISegment{ 0xEC,       0x9AD45F4661015594ULL,  { &F3D_NABOO } },
+             GBISegment{ 0x800,      0xEEB10D73400213B3ULL,  { &F3D_SDK_E } }, // Needs confirmation.
+             GBISegment{ 0x800,      0x49651E384B48F694ULL,  { &F3D_SDK_F } }, // Needs confirmation.
+             GBISegment{ 0x800,      0x1A736198F90E81C5ULL,  { &F3D_SDK_UNKNOWN_G } }, // Needs confirmation.
+@@ -475,6 +479,9 @@ namespace RT64 {
+             case GBIUCode::F3DGOLDEN:
+                 GBI_F3DGOLDEN::setup(&gbi);
+                 break;
++            case GBIUCode::F3DNABOO:
++                GBI_F3DNABOO::setup(&gbi);
++                break;
+             case GBIUCode::F3DPD:
+                 GBI_F3DPD::setup(&gbi);
+                 break;
+diff --git a/src/gbi/rt64_gbi.h b/src/gbi/rt64_gbi.h
+index 69c35d2..538d0b5 100644
+--- a/src/gbi/rt64_gbi.h
++++ b/src/gbi/rt64_gbi.h
+@@ -20,6 +20,7 @@ namespace RT64 {
+         RDP,
+         F3D,
+         F3DGOLDEN,
++        F3DNABOO,
+         F3DPD,
+         F3DWAVE,
+         F3DEX,
+@@ -59,6 +60,7 @@ namespace RT64 {
+         GBIUCode ucode = GBIUCode::Unknown;
+         GBIReset resetFromTask = nullptr;
+         GBIReset resetFromLoad = nullptr;
++        GBIFunction beginDisplayList = nullptr;
+         GBIFunction map[UCODE_MAP_SIZE] = {};
+         std::unordered_map<F3DENUM, uint32_t> constants;
+         GBIFlags flags;
+diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
+new file mode 100644
+index 0000000..537b133
+--- /dev/null
++++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
+@@ -0,0 +1,919 @@
++//
++// RT64
++//
++
++#include "rt64_gbi_f3dnaboo.h"
++
++#include <algorithm>
++#include <cassert>
++#include <cmath>
++#include <cstring>
++
++#include "hle/rt64_interpreter.h"
++
++#include "rt64_gbi_extended.h"
++#include "rt64_gbi_f3d.h"
++#include "rt64_gbi_rdp.h"
++
++// How the microcode's commands behave was worked out by olivieryuyu for
++// GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
++// independent implementation for RT64 that follows that description.
++
++namespace RT64 {
++    namespace GBI_F3DNABOO {
++        // Size of the microcode's data segment, loaded into DMEM at the start of each task.
++        constexpr uint32_t UCodeDataSize = 0xEC;
++        constexpr uint32_t DMEMSize = 0x1000;
++
++        // The first vertex in DMEM and the size of each one. Commands refer to vertices by their DMEM address.
++        constexpr uint32_t VertexBufferAddress = 0x600;
++        constexpr uint32_t VertexBufferStride = 40;
++
++        // DMEM is kept in the same 32-bit word-swapped layout as RDRAM, so byte N of the
++        // microcode's view is at index N ^ 3. The padding catches reads that run past the end.
++        static uint8_t dmem[DMEMSize + 0x100];
++
++        // The address of the next chunk for each display list level.
++        static std::vector<uint32_t> nextChunkStack;
++
++        // Fixed-point matrix used to generate texture coordinates for environment-mapped triangles.
++        static int32_t stMatrix[16];
++
++        static uint32_t &dmemWord(uint32_t address) {
++            return *reinterpret_cast<uint32_t *>(&dmem[address & 0xFFC]);
++        }
++
++        static uint16_t dmemHalf(uint32_t address) {
++            return *reinterpret_cast<uint16_t *>(&dmem[(address & 0xFFE) ^ 2]);
++        }
++
++        static uint8_t &dmemByte(uint32_t address) {
++            return dmem[(address & 0xFFF) ^ 3];
++        }
++
++        static uint32_t rdramWord(State *state, uint32_t address) {
++            return *reinterpret_cast<const uint32_t *>(state->fromRDRAM(address & 0xFFFFFC));
++        }
++
++        static int16_t rdramHalf(State *state, uint32_t address) {
++            return *reinterpret_cast<const int16_t *>(state->fromRDRAM((address & 0xFFFFFE) ^ 2));
++        }
++
++        static DisplayList *rdramDisplayList(State *state, uint32_t address) {
++            return reinterpret_cast<DisplayList *>(state->fromRDRAM(address & 0xFFFFF8));
++        }
++
++        static void copyToDMEM(State *state, uint32_t dmemAddress, uint32_t rdramAddress, uint32_t size) {
++            const uint8_t *src = state->fromRDRAM(0);
++            for (uint32_t i = 0; i < size; i++) {
++                const uint32_t dst = dmemAddress + i;
++                if (dst >= DMEMSize) {
++                    break;
++                }
++
++                dmem[dst ^ 3] = src[((rdramAddress + i) & 0xFFFFFF) ^ 3];
++            }
++        }
++
++        // Display list chunks.
++
++        static void enterChunkList(State *state, DisplayList **dl, uint32_t address, bool push) {
++            const uint32_t nextChunk = rdramWord(state, address) & 0xFFFFFF;
++            if (push) {
++                state->pushReturnAddress(*dl);
++                nextChunkStack.push_back(nextChunk);
++            }
++            else if (!nextChunkStack.empty()) {
++                nextChunkStack.back() = nextChunk;
++            }
++
++            // The interpreter advances past the chunk's header.
++            *dl = rdramDisplayList(state, address);
++        }
++
++        void beginDisplayList(State *state, DisplayList **dl) {
++            const uint32_t dataAddress = state->ext.interpreter->UCode.dataAddress;
++            copyToDMEM(state, 0, dataAddress, UCodeDataSize);
++
++            const uint32_t clearedWords[] = { 0x11C, 0x120, 0x124, 0x37C, 0x58C, 0x5B0, 0x5B4 };
++            for (uint32_t address : clearedWords) {
++                dmemWord(address) = 0;
++            }
++
++            // The task's display list starts with a chunk header.
++            nextChunkStack.clear();
++            nextChunkStack.push_back((*dl)->w0 & 0xFFFFFF);
++            *dl = *dl + 1;
++        }
++
++        void runDl(State *state, DisplayList **dl) {
++            enterChunkList(state, dl, (*dl)->w1, true);
++        }
++
++        void branchDl(State *state, DisplayList **dl) {
++            enterChunkList(state, dl, (*dl)->w1, false);
++        }
++
++        void jumpChunk(State *state, DisplayList **dl) {
++            const uint32_t nextChunk = nextChunkStack.empty() ? 0 : nextChunkStack.back();
++            enterChunkList(state, dl, nextChunk, false);
++        }
++
++        void endDl(State *state, DisplayList **dl) {
++            if (!nextChunkStack.empty()) {
++                nextChunkStack.pop_back();
++            }
++
++            *dl = state->popReturnAddress();
++        }
++
++        // Runs the short display list the game can attach to the next primitive (DMEM 0x58C).
++        static void runSubDisplayList(State *state) {
++            const uint32_t address = dmemWord(0x58C) & 0xFFFFFF;
++            if (address == 0) {
++                return;
++            }
++
++            const GBI *gbi = state->ext.interpreter->hleGBI;
++            const size_t returnDepth = state->returnAddressStack.size();
++            nextChunkStack.push_back(rdramWord(state, address) & 0xFFFFFF);
++
++            DisplayList *dl = rdramDisplayList(state, address) + 1;
++            for (uint32_t guard = 0; (dl != nullptr) && (guard < 0x1000); guard++) {
++                if ((dl->w0 == 0xB8000000) && (dl->w1 == 0xFFFFFFFF)) {
++                    break;
++                }
++
++                const uint8_t nextOpCode = dl[1].w0 >> 24;
++                const DisplayList current = *dl;
++                const GBIFunction func = gbi->map[dl->w0 >> 24];
++                if (func != nullptr) {
++                    func(state, &dl);
++                }
++
++                // The microcode stops before a 0xBD command and leaves it for later.
++                if (nextOpCode == 0xBD) {
++                    dmemWord(0xE58) = current.w0;
++                    dmemWord(0xE5C) = current.w1;
++                    break;
++                }
++
++                if (dl != nullptr) {
++                    dl++;
++                }
++            }
++
++            while (state->returnAddressStack.size() > returnDepth) {
++                state->popReturnAddress();
++            }
++
++            nextChunkStack.pop_back();
++            dmemWord(0x58C) = 0;
++        }
++
++        // DMA and vertices.
++
++        static void dmaDirect(State *state, uint32_t w0, uint32_t w1) {
++            copyToDMEM(state, (w0 >> 8) & 0xFFF, w1 & 0xFFFFFF, ((w0 & 0xFF) + 1) & ~3U);
++        }
++
++        // Reads data that follows the display list stream set up by command 0x02.
++        static void dmaStream(State *state, uint32_t w0) {
++            int32_t remaining = (w0 & 0xFF);
++            if (remaining == 0) {
++                return;
++            }
++
++            uint32_t dmemAddress = (w0 >> 8) & 0xFFF;
++            uint32_t chunkLeft = dmemWord(0xFDC);
++            int32_t total = remaining + 1;
++            for (uint32_t guard = 0; (int32_t(chunkLeft) - total < 0) && (guard < 0x100); guard++) {
++                copyToDMEM(state, dmemAddress, dmemWord(0xFD4), chunkLeft);
++                dmemAddress += chunkLeft;
++                remaining -= int32_t(chunkLeft);
++                total = remaining + 1;
++
++                const uint32_t chunk = dmemWord(0xFD8);
++                dmemWord(0xFD8) = rdramWord(state, chunk);
++                dmemWord(0xFDC) = 0x100;
++                dmemWord(0xFD4) = chunk + 8;
++                chunkLeft = 0x100;
++            }
++
++            copyToDMEM(state, dmemAddress, dmemWord(0xFD4), total);
++            dmemWord(0xFDC) = chunkLeft - total;
++            dmemWord(0xFD4) = dmemWord(0xFD4) + total;
++        }
++
++        static void loadVertices(State *state, const RSP::Vertex *verts, uint32_t count) {
++            count = std::min<uint32_t>(count, (0xD40 - VertexBufferAddress) / VertexBufferStride);
++            if (count > 0) {
++                state->rsp->setVertexFromData(verts, count, 0);
++            }
++        }
++
++        static void vertexOffset(int16_t &x, int16_t &y, int16_t &z) {
++            const uint32_t w0 = dmemWord(0x128);
++            const uint32_t w1 = dmemWord(0x12C);
++            x = int16_t(w0 >> 16);
++            y = int16_t(w0 & 0xFFFF);
++            z = int16_t(w1 >> 16);
++        }
++
++        // Vertices already in DMEM (8 bytes each), moved by the offset at DMEM 0x128.
++        static void vertexFromDMEM(State *state, uint32_t w0, uint32_t w1) {
++            int16_t x0, y0, z0;
++            vertexOffset(x0, y0, z0);
++
++            RSP::Vertex verts[64] = {};
++            const uint32_t count = std::min<uint32_t>((w1 >> 24) & 0x7F, std::size(verts));
++            uint32_t address = (w0 >> 8) & 0xFFF;
++            for (uint32_t i = 0; i < count; i++) {
++                const uint32_t xy = dmemWord(address);
++                const uint32_t z = dmemWord(address + 4);
++                verts[i].x = int16_t((xy >> 16) + x0);
++                verts[i].y = int16_t((xy & 0xFFFF) + y0);
++                verts[i].z = int16_t((z >> 16) + z0);
++                address += 8;
++            }
++
++            loadVertices(state, verts, count);
++        }
++
++        // Vertices in RDRAM (6 bytes each), picked by a list of 16-bit indices in DMEM.
++        static void vertexFromIndices(State *state, uint32_t w0, uint32_t w1) {
++            int16_t x0, y0, z0;
++            vertexOffset(x0, y0, z0);
++
++            RSP::Vertex verts[64] = {};
++            const uint32_t count = std::min<uint32_t>((w1 >> 24) & 0x7F, std::size(verts));
++            const uint32_t indexAddress = (w0 >> 8) & 0xFFF;
++            const uint32_t baseAddress = dmemWord(0x154);
++            for (uint32_t i = 0; i < count; i++) {
++                const uint32_t address = dmemHalf(indexAddress + i * 2) * 6 + baseAddress;
++                verts[i].x = int16_t(rdramHalf(state, address + 0) + x0);
++                verts[i].y = int16_t(rdramHalf(state, address + 2) + y0);
++                verts[i].z = int16_t(rdramHalf(state, address + 4) + z0);
++            }
++
++            loadVertices(state, verts, count);
++        }
++
++        // Lighting. The microcode writes one colour per vertex to DMEM 0xD40, which the triangle commands use.
++        // These work on DMEM bytes directly in its word-swapped layout, the way the microcode's vector code does.
++
++        static void lightingBasic(uint32_t w0, uint32_t w1) {
++            int32_t count = (w1 >> 24) & 0x7F;
++            const uint8_t *factor = &dmem[0x158];
++            const uint8_t *data = &dmem[(w0 >> 8) & 0xFFF];
++            uint8_t *dst = &dmem[0xD40];
++            while ((count > 0) && (dst < &dmem[DMEMSize - 16])) {
++                for (uint32_t j = 0; j < 16; j++) {
++                    dst[j] = (data[j] * factor[j & 7]) >> 8;
++                }
++
++                dst += 16;
++                data += 16;
++                count -= 4;
++            }
++        }
++
++        static void rebuildColors(uint32_t w0, uint32_t w1) {
++            const uint32_t address = (w0 >> 8) & 0xFFF;
++            const uint32_t count = std::min<uint32_t>((w1 >> 24) & 0xFF, (0x588 - address) >> 2);
++            std::vector<uint32_t> colors(count);
++            for (uint32_t i = 0; i < count; i++) {
++                const uint16_t c = dmemHalf(address + i * 2);
++                const uint32_t r = (c >> 8) & 0xF8;
++                const uint32_t g = (c & 0x7E0) >> 3;
++                const uint32_t b = (c & 0x1F) << 3;
++                colors[i] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
++            }
++
++            for (uint32_t i = 0; i < count; i++) {
++                dmemWord(address + i * 4) = colors[i];
++            }
++        }
++
++        static void readPosition(uint32_t address, int16_t &x, int16_t &y, int16_t &z) {
++            const uint32_t xy = dmemWord(address);
++            x = int16_t(xy >> 16);
++            y = int16_t(xy & 0xFFFF);
++            z = int16_t(dmemWord(address + 4) >> 16);
++        }
++
++        // Attenuation of a point light at the given squared distance.
++        static uint32_t pointLightFalloff(uint32_t lightAddress, int32_t distanceSquared) {
++            uint64_t t = dmemWord(lightAddress + 4);
++            t = 0xFFFF000000000000ULL | (t << 16);
++            const uint64_t k = uint64_t(int64_t(distanceSquared)) * t;
++            const uint32_t p = uint32_t(k >> 32);
++            return ((p & 0xFFFF0000) == 0xFFFF0000) ? (p & 0xFFFF) : 0;
++        }
++
++        // Ambient light: adds the light's colour scaled by the vertex colour.
++        static void ambientLight(const uint8_t *light, uint8_t *dst, const uint8_t *data, uint32_t pairs) {
++            for (uint32_t i = 0; i < pairs; i++) {
++                const uint8_t *factor = &dmem[0x158];
++                for (uint32_t v = 0; v < 2; v++) {
++                    dst[0] = (data[0] * factor[0]) >> 8;
++                    for (uint32_t j = 1; j < 4; j++) {
++                        dst[j] = std::min<uint32_t>(((data[j] * factor[j] * light[j]) >> 16) + dst[j], 0xFF);
++                    }
++
++                    factor += 4;
++                    dst += 4;
++                    data += 4;
++                }
++            }
++        }
++
++        static void vertexPair(uint64_t &positions, uint32_t lightAddress, uint32_t vtxAddress[2]) {
++            switch (positions & 3) {
++            case 0:
++                vtxAddress[0] = vtxAddress[1] = lightAddress - 0x10;
++                break;
++            case 1:
++                vtxAddress[0] = lightAddress - 0x08;
++                vtxAddress[1] = lightAddress - 0x10;
++                break;
++            case 2:
++                vtxAddress[0] = lightAddress - 0x10;
++                vtxAddress[1] = lightAddress - 0x08;
++                break;
++            case 3:
++                vtxAddress[0] = vtxAddress[1] = lightAddress - 0x08;
++                break;
++            }
++
++            positions >>= 2;
++        }
++
++        static uint64_t dmemDouble(uint32_t address) {
++            return uint64_t(dmemWord(address)) | (uint64_t(dmemWord(address + 4)) << 32);
++        }
++
++        static void lightingOverlay1(uint32_t w0, uint32_t w1) {
++            const uint32_t size = ((((w1 >> 24) & 0x7F) << 2) + 4) & 0xFFF8;
++            memset(&dmem[0xD40], 0, std::min<uint32_t>(size, DMEMSize - 0xD40));
++
++            uint8_t lightsLeft = dmemByte(0x58B);
++            if (lightsLeft == 0) {
++                dmemWord(0x5B0) = dmemWord(0x5B4) = 0;
++                return;
++            }
++
++            const uint32_t pairs = std::min<uint32_t>(size >> 3, (DMEMSize - 0xD40) >> 3);
++            const uint32_t dataAddress = (w0 >> 8) & 0xFFF;
++            uint32_t lightAddress = 0xB10;
++            while (lightAddress < 0xD40) {
++                uint8_t *dst = &dmem[0xD40];
++                const uint8_t *data = &dmem[dataAddress];
++                const uint8_t *light = &dmem[lightAddress];
++                if (*light == 0) {
++                    ambientLight(light, dst, data, pairs);
++                }
++                else {
++                    const uint8_t *offsets = &dmem[0x380];
++                    uint32_t offsetIndex = 0;
++                    uint64_t positions = dmemDouble(0x5B0);
++                    const uint32_t factors[2] = { dmemWord(0x158), dmemWord(0x15C) };
++                    for (uint32_t i = 0; i < pairs; i++) {
++                        uint32_t vtxAddress[2];
++                        vertexPair(positions, lightAddress, vtxAddress);
++                        for (uint32_t j = 0; j < 2; j++) {
++                            int16_t x1, y1, z1, x, y, z;
++                            readPosition(vtxAddress[j], x1, y1, z1);
++                            readPosition(0x170 + offsets[offsetIndex ^ 3], x, y, z);
++                            offsetIndex++;
++
++                            const int16_t dx = x - x1, dy = y - y1, dz = z - z1;
++                            const uint32_t falloff = pointLightFalloff(lightAddress, dx * dx + dy * dy + dz * dz);
++                            const uint32_t lightColor = dmemWord(lightAddress);
++                            uint32_t r = ((lightColor >> 24) * falloff) >> 16;
++                            uint32_t g = (((lightColor >> 16) & 0xFF) * falloff) >> 16;
++                            uint32_t b = (((lightColor >> 8) & 0xFF) * falloff) >> 16;
++                            const uint32_t a = ((factors[j] & 0xFF) * data[0x3 ^ 3]) >> 8;
++                            if (*light == 4) {
++                                dst[0] = a;
++                                dst[1] = std::min<uint32_t>(dst[1] + b, 0xFF);
++                                dst[2] = std::min<uint32_t>(dst[2] + g, 0xFF);
++                                dst[3] = std::min<uint32_t>(dst[3] + r, 0xFF);
++                            }
++                            else {
++                                r += ((factors[j] >> 24) * data[0x0 ^ 3]) >> 8;
++                                g += (((factors[j] >> 16) & 0xFF) * data[0x1 ^ 3]) >> 8;
++                                b += (((factors[j] >> 8) & 0xFF) * data[0x2 ^ 3]) >> 8;
++                                dst[0] = a;
++                                dst[1] = std::min<uint32_t>(b >> 1, 0xFF);
++                                dst[2] = std::min<uint32_t>(g >> 1, 0xFF);
++                                dst[3] = std::min<uint32_t>(r >> 1, 0xFF);
++                            }
++
++                            dst += 4;
++                            data += 4;
++                        }
++                    }
++                }
++
++                lightsLeft--;
++                if (lightsLeft == 0) {
++                    dmemWord(0x5B0) = dmemWord(0x5B4) = 0;
++                    if (dmemWord(0x5A8) == 0xFFFFFFFF) {
++                        return;
++                    }
++
++                    uint8_t *color = &dmem[0xD40];
++                    const uint8_t *scale = &dmem[0x5A8];
++                    const uint32_t count = std::min<uint32_t>(size >> 2, (DMEMSize - 0xD40) >> 2);
++                    for (uint32_t i = 0; i < count; i++) {
++                        for (uint32_t j = 0; j < 4; j++) {
++                            color[j] = (color[j] * scale[j]) >> 8;
++                        }
++
++                        color += 4;
++                    }
++
++                    return;
++                }
++
++                lightAddress += 0x18;
++            }
++        }
++
++        static void lightingOverlay2(uint32_t w0, uint32_t w1) {
++            const uint32_t size = ((((w1 >> 24) & 0x7F) << 2) + 4) & 0xFFF8;
++            memset(&dmem[0xD40], 0, std::min<uint32_t>(size + 8, DMEMSize - 0xD40));
++
++            uint8_t lightsLeft = dmemByte(0x58B);
++            if (lightsLeft == 0) {
++                dmemWord(0x5B0) = dmemWord(0x5B4) = 0;
++                return;
++            }
++
++            const uint32_t pairs = std::min<uint32_t>(size >> 3, (DMEMSize - 0xD40) >> 3);
++            const uint32_t dataAddress = (w0 >> 8) & 0xFFF;
++            uint32_t lightAddress = 0xB10;
++            while (lightAddress < 0xD40) {
++                uint8_t *dst = &dmem[0xD40];
++                const uint8_t *data = &dmem[dataAddress];
++                const uint8_t *light = &dmem[lightAddress];
++                const uint32_t factors[2] = { dmemWord(0x158), dmemWord(0x15C) };
++                if (*light == 0) {
++                    ambientLight(light, dst, data, pairs);
++                }
++                else if (*light == 1) {
++                    // Directional light.
++                    uint32_t normalAddress = 0x380;
++                    uint64_t positions = dmemDouble(0x5B0);
++                    for (uint32_t i = 0; i < pairs; i++) {
++                        uint32_t vtxAddress[2];
++                        vertexPair(positions, lightAddress, vtxAddress);
++                        for (uint32_t j = 0; j < 2; j++) {
++                            int16_t x, y, z;
++                            readPosition(vtxAddress[j], x, y, z);
++
++                            const uint32_t normal = dmemWord(normalAddress);
++                            const int32_t dot = (x * int8_t(normal >> 24) + y * int8_t(normal >> 16) + z * int8_t(normal >> 8)) >> 8;
++                            uint32_t intensity = uint32_t(dot) & 0xFFFF;
++                            if ((intensity & 0x8000) != 0) {
++                                intensity = 0;
++                            }
++
++                            const uint32_t lightColor = dmemWord(lightAddress);
++                            const uint32_t r = ((lightColor >> 24) * intensity) >> 8;
++                            const uint32_t g = (((lightColor >> 16) & 0xFF) * intensity) >> 8;
++                            const uint32_t b = (((lightColor >> 8) & 0xFF) * intensity) >> 8;
++                            const uint32_t a = (factors[j] & 0xFF) * data[0];
++                            const uint32_t fb = ((factors[j] >> 8) & 0xFF) * data[1];
++                            const uint32_t fg = ((factors[j] >> 16) & 0xFF) * data[2];
++                            const uint32_t fr = (factors[j] >> 24) * data[3];
++                            data += 4;
++
++                            dst[0] = a >> 8;
++                            dst[1] = std::min<uint32_t>(dst[1] + ((b * fb) >> 22), 0xFF);
++                            dst[2] = std::min<uint32_t>(dst[2] + ((g * fg) >> 22), 0xFF);
++                            dst[3] = std::min<uint32_t>(dst[3] + ((r * fr) >> 22), 0xFF);
++                            dst += 4;
++                            normalAddress += 4;
++                        }
++                    }
++                }
++                else {
++                    // Point light.
++                    uint32_t offsetAddress = 0x380;
++                    const uint32_t lightPosition = lightAddress - 0x10;
++                    for (uint32_t i = 0; i < pairs; i++) {
++                        for (uint32_t j = 0; j < 2; j++) {
++                            int16_t x1, y1, z1, x, y, z;
++                            readPosition(lightPosition, x1, y1, z1);
++                            readPosition(0x170 + (dmemWord(offsetAddress + j * 4) & 0xFF), x, y, z);
++
++                            const int16_t dx = x - x1, dy = y - y1, dz = z - z1;
++                            const uint32_t falloff = pointLightFalloff(lightAddress, dx * dx + dy * dy + dz * dz);
++                            const uint8_t *factor = &dmem[0x158 + j * 4];
++                            dst[0] = (data[0] * factor[0]) >> 8;
++                            for (uint32_t k = 1; k < 4; k++) {
++                                dst[k] = std::min<uint32_t>((((((light[k] * falloff) >> 16) * data[k] * factor[k]) + 0x8000) >> 16) + dst[k], 0xFF);
++                            }
++
++                            dst += 4;
++                            data += 4;
++                        }
++
++                        offsetAddress += 8;
++                    }
++                }
++
++                lightsLeft--;
++                if (lightsLeft == 0) {
++                    dmemWord(0x5B0) = dmemWord(0x5B4) = 0;
++                    return;
++                }
++
++                lightAddress += 0x18;
++            }
++        }
++
++        static void lighting(uint32_t w0, uint32_t w1) {
++            const uint32_t flags = w0 >> 22;
++            if ((flags & 2) != 0) {
++                rebuildColors(w0, w1);
++            }
++
++            const uint32_t count = ((w1 >> 24) & 0xFF) | dmemByte(0x58B);
++            if ((count & 0x80) == 0) {
++                if ((flags & 1) != 0) {
++                    lightingOverlay1(w0, w1);
++                }
++                else {
++                    lightingOverlay2(w0, w1);
++                }
++            }
++            else {
++                lightingBasic(w0, w1);
++            }
++        }
++
++        static void loadSTMatrix() {
++            for (uint32_t i = 0; i < 16; i++) {
++                const uint16_t integer = dmemHalf(0xE40 + i * 2);
++                const uint16_t frac = dmemHalf(0xE60 + i * 2);
++                stMatrix[i] = int32_t((uint32_t(integer) << 16) | frac);
++            }
++        }
++
++        void moveMem(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            if ((w1 & 0xFFFFFF) != 0) {
++                dmaDirect(state, w0, w1);
++            }
++            else {
++                dmaStream(state, w0);
++            }
++
++            switch (w0 & 0x00F00000) {
++            case 0x00000000:
++                switch (w0) {
++                case 0x0101300F:
++                    state->rsp->setViewportFromData(reinterpret_cast<const Vp_t *>(&dmem[0x130]));
++                    break;
++                case 0x0105C03F:
++                    state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
++                    break;
++                case 0x010E403F:
++                    loadSTMatrix();
++                    break;
++                default:
++                    break;
++                }
++
++                break;
++            case 0x00100000:
++                vertexFromDMEM(state, w0, w1);
++                break;
++            case 0x00300000:
++                dmemByte(0x58B) = uint8_t(w1 >> 24);
++                break;
++            case 0x00500000:
++                vertexFromIndices(state, w0, w1);
++                break;
++            default:
++                if (((w0 >> 8) & 0xFFF) == 0x480) {
++                    lighting(w0, w1);
++                }
++
++                break;
++            }
++        }
++
++        void setDlistAddress(State *state, DisplayList **dl) {
++            const uint32_t w1 = (*dl)->w1;
++            dmemWord(0xFD4) = w1 + 8;
++            dmemWord(0xFD8) = rdramWord(state, w1);
++            dmemWord(0xFDC) = (*dl)->w0 & 0x1FF;
++        }
++
++        // Triangles.
++
++        static void calculateST(const DisplayList *cmd, uint32_t count, uint32_t st[4]) {
++            const uint32_t *params = reinterpret_cast<const uint32_t *>(cmd);
++            const int16_t subX = int16_t(dmemHalf(0x0F0));
++            const int16_t subY = int16_t(dmemHalf(0x0F2));
++            const int16_t subZ = int16_t(dmemHalf(0x0F4));
++            const uint16_t mulS = dmemHalf(0x0EC);
++            const uint16_t mulT = dmemHalf(0x0EE);
++            const int32_t *m = stMatrix;
++            for (uint32_t i = 0; i < count; i++) {
++                int16_t x, y, z;
++                readPosition(0x170 + (params[i + 4] & 0xFF), x, y, z);
++                int32_t x1 = x * m[0] + y * m[4] + z * m[8] + m[12];
++                int32_t y1 = x * m[1] + y * m[5] + z * m[9] + m[13];
++                int32_t z1 = x * m[2] + y * m[6] + z * m[10] + m[14];
++                x1 -= int32_t(uint32_t(uint16_t(subX)) << 16);
++                y1 -= int32_t(uint32_t(uint16_t(subY)) << 16);
++                z1 -= int32_t(uint32_t(uint16_t(subZ)) << 16);
++
++                const uint64_t x2 = uint64_t(int64_t(x1));
++                const uint64_t y2 = uint64_t(int64_t(y1));
++                const uint64_t z2 = uint64_t(int64_t(z1));
++                const uint64_t r = ((x2 * x2) >> 16) + ((y2 * y2) >> 16) + ((z2 * z2) >> 16);
++                uint32_t r1 = uint32_t(r);
++                if (r > 0x0000FFFFFFFFULL) {
++                    r1 = 0x7FFF0000 | (r & 0xFFFF);
++                }
++
++                uint32_t d = uint32_t(sqrt(double(r1)));
++                d = (d == 0) ? 0xFFFFFFFF : (0xFFFFFFFF / (d * 0x300));
++                const uint32_t v = uint32_t((d * x2) >> 16);
++                const uint32_t w = uint32_t((d * y2) >> 16);
++                const uint32_t s = (v * mulS) >> 16;
++                const uint32_t t = (w * mulT) >> 16;
++                st[i] = (s << 16) | (t & 0xFFFF);
++            }
++        }
++
++        // Gives a vertex the colour and texture coordinates of the triangle being drawn,
++        // copying it first if an earlier triangle already used it.
++        static void setTriangleVertex(State *state, uint32_t index, uint32_t color, bool textured, float s, float t) {
++            RSP *rsp = state->rsp.get();
++            rsp->modifyVertex(index, G_MWO_POINT_ST, 0);
++
++            const uint32_t globalIndex = rsp->indices[index];
++            Workload &workload = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
++            auto &normColBytes = workload.drawData.normColBytes;
++            normColBytes[globalIndex * 4 + 0] = (color >> 24) & 0xFF;
++            normColBytes[globalIndex * 4 + 1] = (color >> 16) & 0xFF;
++            normColBytes[globalIndex * 4 + 2] = (color >> 8) & 0xFF;
++            normColBytes[globalIndex * 4 + 3] = color & 0xFF;
++            workload.drawData.lightIndices[globalIndex] = 0;
++            workload.drawData.lightCounts[globalIndex] = 0;
++            if (textured) {
++                workload.drawData.tcFloats[globalIndex * 2 + 0] = s;
++                workload.drawData.tcFloats[globalIndex * 2 + 1] = t;
++            }
++        }
++
++        // Draws with the microcode's culling rules: none for untextured triangles, and
++        // textured ones that cull both sides only cull back faces.
++        static void drawTriangles(State *state, const uint32_t (*tris)[3], uint32_t triCount, bool textured) {
++            RSP *rsp = state->rsp.get();
++            const uint32_t geometryMode = rsp->geometryModeStack[rsp->geometryModeStackSize - 1];
++            uint32_t drawMode = geometryMode & ~(G_LIGHTING | G_TEXTURE_GEN);
++            if (textured) {
++                if ((drawMode & rsp->cullBothMask) == rsp->cullBothMask) {
++                    drawMode &= ~rsp->cullFrontMask;
++                }
++            }
++            else {
++                drawMode &= ~rsp->cullBothMask;
++            }
++
++            rsp->modifyGeometryMode(0, drawMode);
++            for (uint32_t i = 0; i < triCount; i++) {
++                rsp->drawIndexedTri(tris[i][0], tris[i][1], tris[i][2]);
++            }
++
++            rsp->modifyGeometryMode(0, geometryMode);
++        }
++
++        static uint32_t vertexIndex(uint32_t dmemAddress) {
++            return ((dmemAddress & 0xFFF) - VertexBufferAddress) / VertexBufferStride;
++        }
++
++        void tri(State *state, DisplayList **dl) {
++            const DisplayList *cmd = *dl;
++            const uint32_t *params = reinterpret_cast<const uint32_t *>(cmd);
++            const uint32_t w0 = params[0];
++            const uint32_t w1 = params[1];
++            const uint32_t w2 = params[2];
++            const uint32_t w3 = params[3];
++            const bool isTri2 = (w0 >> 24) == F3DNABOO_G_TRI2;
++            const bool textured = (w0 & 0x0200) != 0;
++            const uint32_t count = isTri2 ? 4 : 3;
++            const uint32_t verts[4] = {
++                vertexIndex(w1 >> 16),
++                vertexIndex(w1),
++                vertexIndex(w3 >> 16),
++                vertexIndex(w3)
++            };
++
++            const uint32_t colorOffsets[4] = { (w2 >> 16) & 0xFF, (w2 >> 8) & 0xFF, w2 & 0xFF, w2 >> 24 };
++
++            uint32_t st[4] = {};
++            if (textured) {
++                if ((w0 & 0x0800) != 0) {
++                    calculateST(cmd, count, st);
++                }
++                else {
++                    for (uint32_t i = 0; i < count; i++) {
++                        st[i] = params[4 + i];
++                    }
++                }
++            }
++
++            bool valid = true;
++            for (uint32_t i = 0; i < count; i++) {
++                valid = valid && (verts[i] < RSP_MAX_VERTICES);
++            }
++
++            if (valid) {
++                // Coordinates are s10.5 with perspective correction and s11.4 without.
++                const bool perspective = (state->rdp->otherMode.textPersp() == G_TP_PERSP);
++                const float stScale = perspective ? (1.0f / 32.0f) : (1.0f / 16.0f);
++                for (uint32_t i = 0; i < count; i++) {
++                    const uint32_t color = dmemWord(0xD40 + colorOffsets[i]);
++                    const float s = int16_t(st[i] >> 16) * stScale;
++                    const float t = int16_t(st[i] & 0xFFFF) * stScale;
++                    setTriangleVertex(state, verts[i], color, textured, s, t);
++                }
++
++                const uint32_t tris[2][3] = { { verts[0], verts[1], verts[2] }, { verts[0], verts[2], verts[3] } };
++                drawTriangles(state, tris, isTri2 ? 2 : 1, textured);
++                runSubDisplayList(state);
++            }
++
++            *dl = *dl + (textured ? 3 : 1);
++        }
++
++        // Other commands.
++
++        void moveWord(State *state, DisplayList **dl) {
++            const uint32_t address = (*dl)->w0 & 0xFFF;
++            const uint32_t value = (*dl)->w1;
++            dmemWord(address) = value;
++
++            RSP *rsp = state->rsp.get();
++            switch (address) {
++            case 0x160:
++                rsp->fog.mul = int32_t(value) / 256.0f;
++                rsp->fogChanged = true;
++                break;
++            case 0x164:
++                rsp->fog.offset = int32_t(value) / 256.0f;
++                rsp->fogChanged = true;
++                break;
++            case 0x14C:
++                rsp->setPerspNorm(value);
++                break;
++            default:
++                break;
++            }
++        }
++
++        void setOtherMode(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            uint32_t mask = uint32_t(int32_t(0x80000000) / (1 << (w0 & 0x1F)));
++            mask >>= (w0 >> 8) & 0x1F;
++
++            RSP *rsp = state->rsp.get();
++            interop::OtherMode &otherMode = rsp->otherModeStack[rsp->otherModeStackSize - 1];
++            const uint32_t word = (w0 >> 16) & 0x7;
++            if (word == 0) {
++                otherMode.H = (otherMode.H & ~mask) | w1;
++            }
++            else if (word == 4) {
++                otherMode.L = (otherMode.L & ~mask) | w1;
++            }
++            else {
++                return;
++            }
++
++            state->rdp->setOtherMode(otherMode.H, otherMode.L);
++        }
++
++        void setOtherModeConditional(State *state, DisplayList **dl) {
++            if ((((*dl)->w0 >> 23) & 1) == dmemWord(0x11C)) {
++                setOtherMode(state, dl);
++            }
++        }
++
++        void clearGeometryMode(State *state, DisplayList **dl) {
++            state->rsp->clearGeometryMode(~(*dl)->w1);
++        }
++
++        void texture(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            GBI_F3D::texture(state, dl);
++            dmemWord(0x148) = w0;
++
++            RSP *rsp = state->rsp.get();
++            const uint32_t geometryMode = rsp->geometryModeStack[rsp->geometryModeStackSize - 1];
++            rsp->modifyGeometryMode(0, (geometryMode & ~0x2U) | (w0 & 0x2));
++        }
++
++        void texrect(State *state, DisplayList **dl) {
++            runSubDisplayList(state);
++
++            const DisplayList *cmd = *dl;
++            const int32_t ulx = cmd[0].p1(12, 12);
++            const int32_t uly = cmd[0].p1(0, 12);
++            const int32_t lrx = cmd[0].p0(12, 12);
++            const int32_t lry = cmd[0].p0(0, 12);
++            const uint8_t tile = cmd[0].p1(24, 3);
++            const int16_t uls = cmd[1].p0(16, 16);
++            const int16_t ult = cmd[1].p0(0, 16);
++            const int16_t dsdx = cmd[1].p1(16, 16);
++            const int16_t dtdy = cmd[1].p1(0, 16);
++            if ((lrx >= ulx) && (lry >= uly)) {
++                state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, false);
++            }
++
++            *dl = *dl + 1;
++        }
++
++        // Generated geometry (terrain, particles and text). Not drawn yet: these only
++        // skip the command's parameters so the rest of the display list stays in sync.
++        void geometryGen(State *state, DisplayList **dl) {
++            switch ((*dl)->w1 & 0xFF) {
++            case 0x09:
++            case 0x0C:
++            case 0x27:
++                *dl = *dl + 2;
++                break;
++            case 0x0F:
++                *dl = *dl + ((dmemByte(0x37E) == 0) ? 7 : 1);
++                break;
++            case 0x15:
++                *dl = *dl + 3;
++                break;
++            case 0x24:
++                runSubDisplayList(state);
++                *dl = *dl + 4;
++                break;
++            case 0x4F:
++                dmemByte(0x37E) = 0;
++                break;
++            default:
++                break;
++            }
++        }
++
++        void polygons(State *state, DisplayList **dl) {
++            // Drawn from the geometry that command 0x05 generates (not drawn yet).
++        }
++
++        void setup(GBI *gbi) {
++            gbi->constants = {
++                { F3DENUM::G_MTX_MODELVIEW, 0x00 },
++                { F3DENUM::G_MTX_PROJECTION, 0x01 },
++                { F3DENUM::G_MTX_MUL, 0x00 },
++                { F3DENUM::G_MTX_LOAD, 0x02 },
++                { F3DENUM::G_MTX_NOPUSH, 0x00 },
++                { F3DENUM::G_MTX_PUSH, 0x04 },
++                { F3DENUM::G_TEXTURE_ENABLE, 0x00000002 },
++                { F3DENUM::G_SHADING_SMOOTH, G_SHADE },
++                { F3DENUM::G_CULL_FRONT, 0x00001000 },
++                { F3DENUM::G_CULL_BACK, 0x00002000 },
++                { F3DENUM::G_CULL_BOTH, 0x00003000 }
++            };
++
++            gbi->map[0x00] = &GBI_EXTENDED::noOpHook;
++            gbi->map[F3DNABOO_G_MOVEMEM] = &moveMem;
++            gbi->map[F3DNABOO_G_SET_DLIST_ADDR] = &setDlistAddress;
++            gbi->map[F3DNABOO_G_GEOMETRY_GEN] = &geometryGen;
++            gbi->map[F3DNABOO_G_DL] = &runDl;
++            gbi->map[F3DNABOO_G_BRANCH_DL] = &branchDl;
++            gbi->map[F3DNABOO_G_TRI2] = &tri;
++            gbi->map[F3DNABOO_G_JUMP_CHUNK] = &jumpChunk;
++            gbi->map[F3DNABOO_G_CLEARGEOMETRYMODE] = &clearGeometryMode;
++            gbi->map[F3DNABOO_G_SETGEOMETRYMODE] = &GBI_F3D::setGeometryMode;
++            gbi->map[F3DNABOO_G_ENDDL] = &endDl;
++            gbi->map[F3DNABOO_G_SETOTHERMODE_C] = &setOtherModeConditional;
++            gbi->map[F3DNABOO_G_SETOTHERMODE] = &setOtherMode;
++            gbi->map[F3DNABOO_G_TEXTURE] = &texture;
++            gbi->map[F3DNABOO_G_MOVEWORD] = &moveWord;
++            gbi->map[F3DNABOO_G_POLYGONS] = &polygons;
++            gbi->map[F3DNABOO_G_TRI1] = &tri;
++            gbi->map[F3DNABOO_G_TEXRECT] = &texrect;
++            gbi->map[G_SETCIMG] = &GBI_F3D::setColorImage;
++            gbi->map[G_SETZIMG] = &GBI_F3D::setDepthImage;
++            gbi->map[G_SETTIMG] = &GBI_F3D::setTextureImage;
++
++            gbi->resetFromTask = &GBI_F3D::reset;
++            gbi->beginDisplayList = &beginDisplayList;
++        }
++    }
++};
+diff --git a/src/gbi/rt64_gbi_f3dnaboo.h b/src/gbi/rt64_gbi_f3dnaboo.h
+new file mode 100644
+index 0000000..511f823
+--- /dev/null
++++ b/src/gbi/rt64_gbi_f3dnaboo.h
+@@ -0,0 +1,37 @@
++//
++// RT64
++//
++
++#pragma once
++
++#include "rt64_gbi.h"
++
++// Factor 5's graphics microcode for Star Wars Episode I: Battle for Naboo.
++// Display lists are made of 0x108-byte chunks (a [next, prev] header and 0x100
++// bytes of commands) and the microcode keeps much of its state in DMEM, so this
++// module models the DMEM areas the commands read and write.
++
++#define F3DNABOO_G_MOVEMEM          0x01
++#define F3DNABOO_G_SET_DLIST_ADDR   0x02
++#define F3DNABOO_G_GEOMETRY_GEN     0x05
++#define F3DNABOO_G_DL               0x06
++#define F3DNABOO_G_BRANCH_DL        0x07
++#define F3DNABOO_G_TRI2             0xB4
++#define F3DNABOO_G_JUMP_CHUNK       0xB5
++#define F3DNABOO_G_CLEARGEOMETRYMODE 0xB6
++#define F3DNABOO_G_SETGEOMETRYMODE  0xB7
++#define F3DNABOO_G_ENDDL            0xB8
++#define F3DNABOO_G_SETOTHERMODE_C   0xB9
++#define F3DNABOO_G_SETOTHERMODE     0xBA
++#define F3DNABOO_G_TEXTURE          0xBB
++#define F3DNABOO_G_MOVEWORD         0xBC
++#define F3DNABOO_G_POLYGONS         0xBE
++#define F3DNABOO_G_TRI1             0xBF
++#define F3DNABOO_G_TEXRECT          0xE4
++
++namespace RT64 {
++    namespace GBI_F3DNABOO {
++        void beginDisplayList(State *state, DisplayList **dl);
++        void setup(GBI *gbi);
++    };
++};
+diff --git a/src/hle/rt64_interpreter.cpp b/src/hle/rt64_interpreter.cpp
+index e75e196..b4e7d3d 100644
+--- a/src/hle/rt64_interpreter.cpp
++++ b/src/hle/rt64_interpreter.cpp
+@@ -173,6 +173,10 @@ namespace RT64 {
+         DisplayList *dl = dlStart;
+         uint8_t opCode;
+         GBIFunction func;
++        if (hleGBI->beginDisplayList != nullptr) {
++            hleGBI->beginDisplayList(state, &dl);
++        }
++
+         while (dl != nullptr) {
+             opCode = (dl->w0 >> 24);
+ 
+diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
+index 1da2550..2d187d5 100644
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -307,7 +307,10 @@ namespace RT64 {
+ #   endif
+ 
+         const uint32_t rdramAddress = fromSegmentedMasked(address);
+-        const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
++        forceMatrixFromData(reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress)));
++    }
++
++    void RSP::forceMatrixFromData(const FixedMatrix *fixedMatrix) {
+         modelViewProjMatrix = fixedMatrix->toMatrix4x4();
+         modelViewProjInserted = true;
+         modelViewProjChanged = false;
+@@ -375,6 +378,18 @@ namespace RT64 {
+         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
+         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
+     }
++
++    void RSP::setVertexFromData(const Vertex *verts, uint32_t vtxCount, uint32_t dstIndex) {
++        if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
++            assert(false && "Vertex indices are not valid. DL is possibly corrupted.");
++            return;
++        }
++
++        // Vertices built by the microcode itself rather than read from RDRAM, so
++        // there's no address for extended vertex segments to use.
++        memcpy(&vertices[dstIndex], verts, sizeof(Vertex) * vtxCount);
++        setVertexCommon<true, sizeof(Vertex)>(0, dstIndex, dstIndex + vtxCount);
++    }
+     
+     void RSP::setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex) {
+         if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
+@@ -913,6 +928,19 @@ namespace RT64 {
+         viewportChanged = true;
+     }
+ 
++    void RSP::setViewportFromData(const Vp_t *vp) {
++        const uint16_t ori = extended.global.viewportOrigin;
++        interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
++        viewport.scale.x = float(vp->vscale[1]) / 4.0f;
++        viewport.scale.y = float(vp->vscale[0]) / 4.0f;
++        viewport.scale.z = float(vp->vscale[3]) / DepthRange;
++        viewport.translate.x = float(state->rdp->movedFromOrigin(vp->vtrans[1], ori) + extended.global.viewportOffsetX) / 4.0f;
++        viewport.translate.y = float(vp->vtrans[0] + extended.global.viewportOffsetY) / 4.0f;
++        viewport.translate.z = float(vp->vtrans[3]) / DepthRange;
++        extended.viewportOriginStack[viewportStackSize - 1] = ori;
++        viewportChanged = true;
++    }
++
+     void RSP::pushViewport() {
+         if (viewportStackSize < RSP_EXTENDED_STACK_SIZE) {
+             viewportStack[viewportStackSize] = viewportStack[viewportStackSize - 1];
+diff --git a/src/hle/rt64_rsp.h b/src/hle/rt64_rsp.h
+index 61bb3b1..7dd124f 100644
+--- a/src/hle/rt64_rsp.h
++++ b/src/hle/rt64_rsp.h
+@@ -10,6 +10,7 @@
+ 
+ #include "common/rt64_common.h"
+ #include "gbi/rt64_display_list.h"
++#include "gbi/rt64_f3d.h"
+ #include "shared/rt64_other_mode.h"
+ #include "shared/rt64_rsp_fog.h"
+ #include "shared/rt64_rsp_light.h"
+@@ -246,12 +247,14 @@ namespace RT64 {
+         void popProjectionMatrix();
+         void insertMatrix(uint32_t address, uint32_t value);
+         void forceMatrix(uint32_t address);
++        void forceMatrixFromData(const FixedMatrix *fixedMatrix);
+         void setProjectionMatrixFloat(uint32_t address);
+         void setViewMatrixFloat(uint32_t address);
+         void computeModelViewProj();
+         void specialComputeModelViewProj();
+         void setModelViewProjChanged(bool changed);
+         void setVertex(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
++        void setVertexFromData(const Vertex *verts, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexColorPD(uint32_t address);
+@@ -269,6 +272,7 @@ namespace RT64 {
+         void setObjRenderMode(uint32_t value);
+         void setViewport(uint32_t address);
+         void setViewport(uint32_t address, uint16_t ori, int16_t offx, int16_t offy);
++        void setViewportFromData(const Vp_t *vp);
+         void pushViewport();
+         void popViewport();
+         void setLight(uint8_t index, uint32_t address);
