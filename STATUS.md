@@ -42,6 +42,39 @@ the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
 
+## 2026-10-27, round 17 (in progress): reading the microcode for the terrain
+
+The terrain, sky and other generated geometry (commands `05`, `BE`) are
+being worked out from Factor 5's microcode itself (round 16 for why).
+
+**Reference pictures.** mupen64plus with its low-level RSP and RDP plugins
+(`mupen64plus-rsp-z64`, `mupen64plus-video-z64`) runs the real microcode
+and draws the game correctly: the snowy terrain under the LucasArts intro,
+the title screen's scene, the Naboo fly-over, the high-score screen.
+`tools/mupen_dump.c` now takes `NABOO_M64_GFX`/`NABOO_M64_RSP` to use them.
+
+**The microcode's layout** (`tools/rsp_disasm.py` disassembles it):
+
+- 0x2950 bytes at `0x4003A8C0`; the first 0x1000 are resident at IMEM
+  `0x1000`, the rest are overlays DMA'd in on demand.
+- The command loop is at IMEM `0x1038`. Commands `C0`-`FF` go to the RDP
+  as they are; the others jump through a table of IMEM addresses in DMEM
+  (`06` call `0x1754`, `07` branch `0x176C`, `B8` return `0x1778`, `B4`/`BF`
+  triangles `0x1B44`/`0x1B24`, `BE` `0x1B08`, `05` `0x1A60`).
+- `05` loads the overlay whose id is its sub-mode (`w1 & 0x3F`; the ids
+  are multiples of 3) through the loader at `0x1164`. Overlay table at DMEM
+  `0x6A`, 3 bytes per id: IMEM entry (one of `0x1D60`/`0x1AA0`/`0x1CF0`,
+  from the halfwords at DMEM `0x64`), length, and offset in the microcode.
+  Terrain generation is `09` (0x29C bytes from +`0x1110`), `0C` (0x2C8 from
+  +`0x13B0`) and `0F` (0x27C from +`0x1680`), all at `0x1CF0`; `15`, `18`,
+  `24`, `27` load at `0x1D60`; `2A` is the environment-mapped texture
+  coordinates, `12` (at `0x1AA0`) is likely the terrain polygons.
+
+**Plan.** RSPRecomp supports overlay slots, so the whole microcode can be
+recompiled and run in a test harness on captured tasks: the reference to
+check an HLE implementation of each terrain command against, values and
+all, before it goes into the RT64 module.
+
 ## 2026-10-27, round 16: textures on the right faces
 
 Tested on Windows after round 15: the LucasArts logo's textures were
