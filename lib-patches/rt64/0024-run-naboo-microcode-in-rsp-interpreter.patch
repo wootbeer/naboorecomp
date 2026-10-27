@@ -27,7 +27,7 @@ index cd16f1c..431c13e 100644
      add_library(rt64 STATIC ${SOURCES})
  else()
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 737b013..97091f7 100644
+index 737b013..bc78f51 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -7,13 +7,17 @@
@@ -48,7 +48,7 @@ index 737b013..97091f7 100644
  
  // How the microcode's commands behave was worked out by olivieryuyu for
  // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
-@@ -91,15 +95,354 @@ namespace RT64 {
+@@ -91,15 +95,359 @@ namespace RT64 {
              *dl = rdramDisplayList(state, address);
          }
  
@@ -98,11 +98,13 @@ index 737b013..97091f7 100644
 +        // transform to load the same vertices (and matrix) into RT64, and at its triangle
 +        // routine to draw the triangle from them. Everything else the microcode does
 +        // (lighting, texture coordinates, its other RDP commands) carries on as written.
-+        // Still in progress (textures come out wrong), so it's off unless RT64_NABOO_3D_TRIANGLES=1;
-+        // otherwise RT64 draws the microcode's own RDP triangles.
++        // Off unless RT64_NABOO_3D_TRIANGLES=1 until the camera can be told apart from the combined
++        // matrices (RT64's frame interpolation needs it); otherwise RT64 draws the microcode's RDP triangles.
 +
 +        // IMEM addresses (as the interpreter sees them, within the 4 KB of IMEM).
 +        constexpr uint32_t HookTriangle = 0x1A8;            // 0x040011A8: the triangle routine, $11-$13 its vertices.
++        constexpr uint32_t HookTriangleDraw = 0x2B0;        // 0x040012B0: about to write the RDP triangle.
++        constexpr uint32_t HookTriangleReturn = 0x744;      // 0x04001744: the routine's return.
 +        constexpr uint32_t HookTransformFirst = 0x890;      // 0x04001890: loads the first two vertices to transform.
 +        constexpr uint32_t HookTransformNext = 0x95C;       // 0x0400195C: loads the next two.
 +
@@ -160,6 +162,17 @@ index 737b013..97091f7 100644
 +            hookMatrixLoaded = true;
 +        }
 +
++        // The viewport (DMEM 0x130), loaded into RT64 when it changes. RT64 takes it with each vertex.
++        static void loadHookViewport(State *state) {
++            if (hookViewportLoaded && (memcmp(hookViewportData, &dmem[0x130], sizeof(hookViewportData)) == 0)) {
++                return;
++            }
++
++            memcpy(hookViewportData, &dmem[0x130], sizeof(hookViewportData));
++            state->rsp->setViewportFromData(reinterpret_cast<const Vp_t *>(&dmem[0x130]));
++            hookViewportLoaded = true;
++        }
++
 +        static bool vertexSlot(uint32_t address, uint32_t &slot) {
 +            address &= 0xFFF;
 +            if ((address < VertexBufferAddress) || (((address - VertexBufferAddress) % VertexBufferStride) != 0)) {
@@ -183,6 +196,7 @@ index 737b013..97091f7 100644
 +            }
 +
 +            loadHookMatrix(state);
++            loadHookViewport(state);
 +
 +            // RT64 picks up lighting, fog and texture generation from the geometry mode when vertices
 +            // are loaded. The microcode has done its own lighting and texture coordinates.
@@ -222,7 +236,7 @@ index 737b013..97091f7 100644
 +
 +            for (uint32_t c = 0; c < 4; c++) {
 +                const float clip = dmemFixed(address + c * 2, address + 8 + c * 2);
-+                const float tolerance = 1.0f + std::fabs(hooked.clip[c]) * (1.0f / 256.0f);
++                const float tolerance = 0.01f + std::fabs(hooked.clip[c]) * (1.0f / 1024.0f);
 +                if (std::fabs(clip - hooked.clip[c]) > tolerance) {
 +                    return false;
 +                }
@@ -249,83 +263,69 @@ index 737b013..97091f7 100644
 +            rsp->gpr[16] = RDPStagingAddress;
 +        }
 +
-+        // At the triangle routine: $11, $12 and $13 point to its vertices in DMEM.
-+        static bool hookTriangle(RSPInterpreter *rsp, State *state) {
-+            const uint32_t addresses[3] = { rsp->gpr[11] & 0xFFF, rsp->gpr[12] & 0xFFF, rsp->gpr[13] & 0xFFF };
-+            uint32_t slots[3];
++        // The triangle the routine was entered with, while the microcode decides whether it's drawn.
++        static uint32_t pendingSlots[3];
++        static uint32_t pendingAddresses[3];
++        static bool pendingValid = false;
++        static bool pendingDrawn = false;
++
++        // At the triangle routine's start: $11, $12 and $13 point to its vertices in DMEM.
++        static void hookTriangle(RSPInterpreter *rsp) {
++            pendingValid = true;
++            pendingDrawn = false;
 +            for (uint32_t i = 0; i < 3; i++) {
-+                if (!vertexSlot(addresses[i], slots[i]) || !hookedVertexValid(addresses[i], slots[i])) {
++                pendingAddresses[i] = rsp->gpr[11 + i] & 0xFFF;
++                if (!vertexSlot(pendingAddresses[i], pendingSlots[i]) || !hookedVertexValid(pendingAddresses[i], pendingSlots[i])) {
 +                    // Not from the transform: the microcode draws it.
-+                    return false;
++                    pendingValid = false;
++                    return;
 +                }
 +            }
++        }
 +
-+            const uint32_t returnAddress = rsp->gpr[31];
-+            const uint32_t geometryMode = rsp->gpr[21];
-+
-+            // All three outside the same side of the screen.
-+            const uint32_t outside = dmemHalf(addresses[0] + 0x24) & dmemHalf(addresses[1] + 0x24) & dmemHalf(addresses[2] + 0x24);
-+            if ((outside & 0x7070) != 0) {
-+                rsp->setPc(returnAddress);
-+                return true;
++        // Where the routine starts writing the RDP triangle. Getting here, the microcode has
++        // rejected triangles off the screen, culled back faces, and sent what the triangle needs
++        // (texture loads and so on) to the RDP. A triangle that needs clipping gets here once for
++        // each visible piece, through the clipping overlay; RT64 does its own clipping, so the
++        // whole triangle is drawn the first time.
++        static bool hookTriangleDraw(RSPInterpreter *rsp, State *state) {
++            if (!pendingValid) {
++                return false;
 +            }
 +
-+            // The microcode culls back faces with bit 13 of the geometry mode, from their area on
-+            // screen. The same test in clip space works for triangles that cross the camera's plane.
-+            if ((geometryMode & 0x2000) != 0) {
-+                double v[3][3];
++            if (!pendingDrawn) {
++                pendingDrawn = true;
++                sendStagedRDPCommands(rsp, state);
++
++                RSP *rt64Rsp = state->rsp.get();
++
++                // The low bits of the geometry mode are the RDP triangle's: shade, texture and depth.
++                const uint32_t geometryMode = rsp->gpr[21];
++                const bool textured = (geometryMode & 0x2) != 0;
++                if (textured) {
++                    DisplayList textureCommand;
++                    textureCommand.w0 = dmemWord(0x148) | 0x1;
++                    textureCommand.w1 = 0xFFFFFFFF;
++                    DisplayList *textureDl = &textureCommand;
++                    GBI_F3D::texture(state, &textureDl);
++                }
++
++                const bool perspective = (state->rdp->otherMode.textPersp() == G_TP_PERSP);
++                const float stScale = perspective ? (1.0f / 32.0f) : (1.0f / 16.0f);
 +                for (uint32_t i = 0; i < 3; i++) {
-+                    v[i][0] = dmemFixed(addresses[i] + 0, addresses[i] + 8);
-+                    v[i][1] = dmemFixed(addresses[i] + 2, addresses[i] + 10);
-+                    v[i][2] = dmemFixed(addresses[i] + 6, addresses[i] + 14);
++                    const uint32_t color = dmemWord(pendingAddresses[i] + 0x10);
++                    const uint32_t st = dmemWord(pendingAddresses[i] + 0x14);
++                    setTriangleVertex(state, pendingSlots[i], color, textured, int16_t(st >> 16) * stScale, int16_t(st & 0xFFFF) * stScale);
 +                }
 +
-+                const double det =
-+                    v[0][0] * (v[1][1] * v[2][2] - v[1][2] * v[2][1]) -
-+                    v[0][1] * (v[1][0] * v[2][2] - v[1][2] * v[2][0]) +
-+                    v[0][2] * (v[1][0] * v[2][1] - v[1][1] * v[2][0]);
-+
-+                const double scaleX = int16_t(dmemHalf(0x130));
-+                const double scaleY = int16_t(dmemHalf(0x132));
-+                if ((-scaleX * scaleY * det) < 0.0) {
-+                    rsp->setPc(returnAddress);
-+                    return true;
-+                }
++                const uint32_t savedGeometryMode = rt64Rsp->geometryModeStack[rt64Rsp->geometryModeStackSize - 1];
++                rt64Rsp->modifyGeometryMode(0, geometryMode & 0x7);
++                rt64Rsp->drawIndexedTri(pendingSlots[0], pendingSlots[1], pendingSlots[2]);
++                rt64Rsp->modifyGeometryMode(0, savedGeometryMode);
 +            }
 +
-+            sendStagedRDPCommands(rsp, state);
-+
-+            RSP *rt64Rsp = state->rsp.get();
-+            if (!hookViewportLoaded || (memcmp(hookViewportData, &dmem[0x130], sizeof(hookViewportData)) != 0)) {
-+                memcpy(hookViewportData, &dmem[0x130], sizeof(hookViewportData));
-+                rt64Rsp->setViewportFromData(reinterpret_cast<const Vp_t *>(&dmem[0x130]));
-+                hookViewportLoaded = true;
-+            }
-+
-+            // The low bits of the geometry mode are the RDP triangle's: shade, texture and depth.
-+            const bool textured = (geometryMode & 0x2) != 0;
-+            if (textured) {
-+                DisplayList textureCommand;
-+                textureCommand.w0 = dmemWord(0x148) | 0x1;
-+                textureCommand.w1 = 0xFFFFFFFF;
-+                DisplayList *textureDl = &textureCommand;
-+                GBI_F3D::texture(state, &textureDl);
-+            }
-+
-+            const bool perspective = (state->rdp->otherMode.textPersp() == G_TP_PERSP);
-+            const float stScale = perspective ? (1.0f / 32.0f) : (1.0f / 16.0f);
-+            for (uint32_t i = 0; i < 3; i++) {
-+                const uint32_t color = dmemWord(addresses[i] + 0x10);
-+                const uint32_t st = dmemWord(addresses[i] + 0x14);
-+                setTriangleVertex(state, slots[i], color, textured, int16_t(st >> 16) * stScale, int16_t(st & 0xFFFF) * stScale);
-+            }
-+
-+            const uint32_t savedGeometryMode = rt64Rsp->geometryModeStack[rt64Rsp->geometryModeStackSize - 1];
-+            rt64Rsp->modifyGeometryMode(0, geometryMode & 0x7);
-+            rt64Rsp->drawIndexedTri(slots[0], slots[1], slots[2]);
-+            rt64Rsp->modifyGeometryMode(0, savedGeometryMode);
-+
-+            rsp->setPc(returnAddress);
++            // Skip writing the RDP triangle: on to the routine's return.
++            rsp->setPc(HookTriangleReturn);
 +            return true;
 +        }
 +
@@ -339,7 +339,10 @@ index 737b013..97091f7 100644
 +                hookTransform(rsp, state, true);
 +                return false;
 +            case HookTriangle:
-+                return hookTriangle(rsp, state);
++                hookTriangle(rsp);
++                return false;
++            case HookTriangleDraw:
++                return hookTriangleDraw(rsp, state);
 +            default:
 +                return false;
 +            }
@@ -356,6 +359,7 @@ index 737b013..97091f7 100644
 +                rspInterpreter->hook = &interpreterHook;
 +                if (useTriangleHooks()) {
 +                    rspInterpreter->setHook(HookTriangle, true);
++                    rspInterpreter->setHook(HookTriangleDraw, true);
 +                    rspInterpreter->setHook(HookTransformFirst, true);
 +                    rspInterpreter->setHook(HookTransformNext, true);
 +                }
@@ -367,6 +371,7 @@ index 737b013..97091f7 100644
 +            hookGeneration++;
 +            hookMatrixLoaded = false;
 +            hookViewportLoaded = false;
++            pendingValid = false;
 +            rsp->dmem = dmem;
 +            rsp->rdram = state->RDRAM;
 +            rsp->rdramSize = 0x800000;
@@ -393,21 +398,21 @@ index 737b013..97091f7 100644
 +
 +            for (uint32_t i = 0; i < std::size(task); i++) {
 +                rsp->setDMEMWord(0xFC0 + i * 4, task[i]);
-             }
- 
++            }
++
 +            memset(rsp->gpr, 0, sizeof(rsp->gpr));
 +            rsp->setPc(0);
 +            const RSPInterpreter::Result result = rsp->run(200000000ULL);
 +            if (result != RSPInterpreter::Result::Broke) {
 +                fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
-+            }
+             }
 +        }
-+
+ 
 +        void beginDisplayList(State *state, DisplayList **dl) {
              // The microcode only ever takes the combined model-view-projection matrix (forced
              // through RSP::forceMatrixFromData), so the projection RT64 composes with is the identity.
              RSP *rsp = state->rsp.get();
-@@ -111,6 +454,20 @@ namespace RT64 {
+@@ -111,6 +459,20 @@ namespace RT64 {
              rsp->projectionMatrixInversed = true;
              rsp->projectionMatrixChanged = true;
  

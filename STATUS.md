@@ -77,18 +77,47 @@ bugs were found on the way:
   aliasing, GCC at -O2 dropped `VMOV`'s result. The file is built with
   `-fno-strict-aliasing` (and `-msse4.1`).
 
-**Next: triangles in 3D.** Drawing the RDP's triangles gives RT64 only
-screen positions, so no widescreen and no frame interpolation. Started: the
-interpreter stops at the vertex transform (`0x1890`/`0x195C`) to load the
-model-space vertices and combined matrix into RT64, and at the triangle
-routine (`0x11A8`; `$11`-`$13` the vertices in DMEM) to draw the triangle
-from them, with the microcode's own back-face test (bit 13 of `$21`) done
-in clip space, and the RDP commands waiting in DMEM sent first so the order
-holds. The geometry comes out in place, but textures and colours don't
-yet, so it's off unless `RT64_NABOO_3D_TRIANGLES=1`.
+**Triangles in 3D** (`RT64_NABOO_3D_TRIANGLES=1`). Drawing the RDP's
+triangles gives RT64 only screen positions, so no widescreen and no frame
+interpolation. With this set, the interpreter stops at:
 
-**Still black after the Factor 5 logo** with the real microcode, with the
-logo faintly left on screen: the next thing to look at.
+- the vertex transform's loads (`0x1890`, `0x195C`; `$13` the model space
+  vertices, `$9` where they go, `$10` the count) to load the same vertices
+  into RT64, with the combined matrix (DMEM `0x5C0`) and viewport (`0x130`);
+- the triangle routine's start (`0x11A8`; `$11`-`$13` its vertices), to
+  check they're the ones loaded (their clip coordinates in DMEM against the
+  matrix's; on every captured task all match, within 3e-5);
+- `0x12B0`, where the routine is about to write the RDP triangle, to draw
+  it in RT64 and skip to the routine's return (`0x1744`).
+
+Drawing at `0x12B0` rather than at the start matters: in between, the
+microcode rejects triangles off screen, culls back faces, and (through the
+`jalr` at `0x12A8`) sends the RDP the triangle's texture loads and combiner,
+so a triangle drawn at the start used the previous one's texture. At
+`0x12B0` the hook count equals the RDP triangle count on every captured task,
+with nothing in between. A triangle that needs clipping reaches it once per
+visible piece (through the clipping overlay); RT64 clips for itself, so the
+whole triangle is drawn the first time. The RDP commands still waiting in
+DMEM (`0xE80` up to `$16`) are sent to RT64 before each triangle.
+
+Two more traps: RT64 takes the viewport with each vertex when it's loaded,
+so it has to be set before the transform's first vertices, not at the first
+triangle (or the first batch, usually the terrain, comes out stretched into
+wedges); and a by-hand back-face test in clip space had its sign flipped by
+the viewport's Y scale, which is why the microcode is now left to cull.
+Checked side by side with the RDP triangles through the intro: same frames.
+
+It stays off by default for now: it turns on RT64's frame interpolation,
+which pairs each object's combined matrix with the next frame's and pulls
+models apart (the detached limbs from round 16). Telling the camera apart
+from the combined matrices is the next step, for interpolation and for
+widescreen alike.
+
+**Still black after the Factor 5 logo**, with the real microcode too. It's
+not the rendering: what comes next is the title screen, a picture drawn as
+548 texture rectangles from strips of RAM at `0x80436BC0`-`0x8044EBC0`, and
+those strips are mostly zeros in the port. Something on the CPU side doesn't
+fill them in; next to compare against mupen64plus's RAM.
 
 ### Before: reading the microcode for the terrain
 
