@@ -6,13 +6,14 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 11)
+## Overview (as of round 12)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
-game's threads, the VI and the video mode, its file loader, the first audio
-buffers and its first graphics task. Nothing is drawn: the game uses Factor
-5's own graphics microcode, which RT64 doesn't support (round 10).
+game's threads, the VI and the video mode, its file loader, audio, and on
+through hundreds of frames into 3D scenes (round 12). Nothing is drawn: the
+game uses Factor 5's own graphics microcode, which RT64 doesn't support yet;
+that is the work now (rounds 10-12).
 
 **How the main areas got here** (the rounds to read for each):
 
@@ -30,6 +31,46 @@ buffers and its first graphics task. Nothing is drawn: the game uses Factor
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-27, round 12: a frame-wait busy loop; first 3D frames captured
+
+After about 30 graphics tasks thread 3 (game logic, now in `.paged`:
+`func_41000000` -> ... -> `func_40024530`) sat at full CPU in
+`func_40037A60`: it stores a frame count at `0x40090512` and spins until the
+VI side counts it down to 0, with no OS call in the loop. On the N64 the VI
+interrupt preempts it; here game threads only switch at OS calls. A hook at
+the loop head (`0x40037A7C`) calls `yield_self_1ms`, which delivers pending
+events and lets the higher-priority thread run. The BattleTanx port fixed
+its busy-waits the same way.
+
+With that the game runs on: graphics tasks 100 and 250 captured
+(`NABOO_DUMP_GFX`). Display lists decoded with `tools/naboo_dl.py`:
+
+- Same chunk layout as Rogue Squadron's: 0x108-byte chunks from a pool,
+  header `[next, previous]` then 0x100 bytes of commands; `06` calls a list
+  by its header address, `B8` returns. Static lists in `.main`'s data (e.g.
+  `0x4004CC20`) have the same header.
+- Task 30 and 100 (boot): standard RDP setup only: SETCIMG (320 wide at
+  `0x805F6000`), SETZIMG (`0x8071B800`), FILLRECT clears, SETOTHERMODE,
+  MOVEWORD, prim/fog colours, ED (SETSCISSOR), and `01` (Factor 5 MOVEMEM,
+  a direct copy into DMEM).
+- Task 250: 3D. `B4` (Factor 5 TRI2) 27 times, `BF` (TRI1), `B5` (jump
+  list), `02` (set list address), TEXTURE, SETCOMBINE, SETENVCOLOR. The
+  walker still reads the extra words of the multi-word commands (the
+  textured triangle forms are 32 bytes) as commands of their own: the next
+  step is each command's real length, from the microcode and GLideN64's
+  description of it.
+
+The plan from here (owner's choice, for proper widescreen and
+interpolation): a Battle for Naboo GBI in RT64 (a lib-patch adding a module
+like RT64's F3DEX ones), detected by the microcode's hash, with a model of
+the microcode's DMEM rebuilt from the task's ucode data at each task (the
+microcode keeps its display-list streaming state and tables there, as
+GLideN64's implementation shows). References: GLideN64's
+`F5Indi_Naboo.cpp` (GPL-2.0 only: for what each command does, no code),
+the Rogue Squadron RT64 fork's `rt64_gbi_f3dfactor5.cpp` (MIT, for an
+earlier version of the microcode), and n64js (MIT), which runs this
+microcode on its RSP.
 
 ## 2026-10-27, round 11: round 9's fix was racy; a frame capture tool
 

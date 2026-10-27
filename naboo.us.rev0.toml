@@ -36,6 +36,16 @@ func = "func_4003A4DC"
 before_vram = 0x4003A504
 text = "    { extern void naboo_init_os(uint8_t *rdram); naboo_init_os(rdram); }"
 
+# Busy-waits that rely on an interrupt-driven thread preempting them. Game
+# threads only switch at OS calls here, so each loop delivers pending events
+# and lets a higher-priority thread run (STATUS.md round 12).
+# func_40037A60: waits N frames, spinning until the VI side counts the
+# halfword at 0x40090512 down to 0.
+[[patches.hook]]
+func = "func_40037A60"
+before_vram = 0x40037A7C
+text = "    { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
+
 # Debugging aid: saves RAM at chosen graphics tasks (NABOO_DUMP_GFX, see
 # src/game/gfx_dump.cpp). func_40023558 is the game's RSP task launcher.
 [[patches.hook]]
