@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 15)
+## Overview (as of round 16)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -41,6 +41,30 @@ microcode generates itself (commands `05`/`BE`) are next.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-27, round 16: textures on the right faces
+
+Tested on Windows after round 15: the LucasArts logo's textures were
+misaligned (letters scattered across the L), and model limbs looked
+detached; after the Factor 5 logo the screen went black.
+
+**Textures.** A triangle command can run a short display list the game
+attaches at DMEM `0x58C` (it loads the triangle's texture). The module ran
+it after drawing the triangle, so every textured face used the previous
+face's texture. GLideN64 adds the triangle, runs the list, and only draws
+pending triangles afterwards (its tile and load commands don't flush), so
+the list's texture is the triangle's own. Now the list runs before the
+draw, and the LucasArts logo comes out right. (Texture coordinates were
+checked along the way: s10.5 with perspective, as before; doubling them
+made it worse.)
+
+**Black after the Factor 5 logo.** The game carries on: those scenes are
+built from the terrain and sky the microcode generates itself (`05`
+sub-modes `09`/`0C`, `15`, and `BE`, 300-450 a frame), which the module
+skips. That's the next piece. GLideN64's implementation of them is
+GPL-2.0-only, which can't be combined with this GPL-3.0 project, so they
+will be worked out from the microcode itself (readable through RSPRecomp's
+output, and checkable by running the real microcode on the same DMEM).
 
 ## 2026-10-27, round 15: the intro right way up and running on
 

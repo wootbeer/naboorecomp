@@ -82,10 +82,10 @@ index 69c35d2..538d0b5 100644
          GBIFlags flags;
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
 new file mode 100644
-index 0000000..3914680
+index 0000000..737b013
 --- /dev/null
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
-@@ -0,0 +1,948 @@
+@@ -0,0 +1,949 @@
 +//
 +// RT64
 +//
@@ -858,8 +858,9 @@ index 0000000..3914680
 +                }
 +
 +                const uint32_t tris[2][3] = { { verts[0], verts[1], verts[2] }, { verts[0], verts[2], verts[3] } };
-+                drawTriangles(state, tris, isTri2 ? 2 : 1, textured);
++                // The display list attached to the primitive (texture loads) is for this one.
 +                runSubDisplayList(state);
++                drawTriangles(state, tris, isTri2 ? 2 : 1, textured);
 +            }
 +
 +            *dl = *dl + (textured ? 3 : 1);
