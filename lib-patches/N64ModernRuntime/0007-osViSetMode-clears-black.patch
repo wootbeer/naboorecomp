@@ -1,0 +1,15 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 4ad854b..5b6e56a 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -475,6 +475,10 @@ extern "C" void osViSetMode(RDRAM_ARG PTR(OSViMode) mode_) {
+     OSViMode* mode = TO_PTR(OSViMode, mode_);
+     ViState* next_state = events_context.vi.get_next_state();
+     next_state->mode = mode;
++    // libultra replaces the whole state with "mode updated", which also clears
++    // osViBlack and osViRepeatLine. Battle for Naboo turns the screen black at
++    // boot and relies on this to turn it back on.
++    next_state->state = 0;
+     next_state->control = next_state->mode->comRegs.ctrl;
+ }
+ 

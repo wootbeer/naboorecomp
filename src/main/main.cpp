@@ -101,10 +101,18 @@ template <typename... Ts>
 RspExitReason musyx_audio(uint8_t* rdram, uint32_t ucode_addr);
 #endif
 
+// NABOO_NO_AUDIO=1 skips the audio tasks (for telling audio problems apart from others).
+static RspExitReason skip_audio_task(uint8_t*, uint32_t) {
+    return RspExitReason::Broke;
+}
+
 static RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     switch (task->t.type) {
 #ifdef NABOO_HAS_RSP_AUDIO
     case M_AUDTASK:
+        if (getenv("NABOO_NO_AUDIO") != nullptr) {
+            return skip_audio_task;
+        }
         return musyx_audio;
 #endif
     default:

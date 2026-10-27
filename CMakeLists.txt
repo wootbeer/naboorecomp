@@ -124,6 +124,9 @@ target_compile_options(RecompiledFuncs PRIVATE
     -falign-functions=16
     # Declarations for the [[patches.hook]] text in naboo.us.rev0.toml.
     ${NABOO_RECOMP_HOOKS_FORCE_INCLUDE}
+    # Debugging aid: e.g. -DNABOO_FUNCS_DEBUG_FLAGS=-fno-inline so a debugger
+    # attributes code to the game function it belongs to.
+    ${NABOO_FUNCS_DEBUG_FLAGS}
 )
 
 target_include_directories(RecompiledFuncs PRIVATE

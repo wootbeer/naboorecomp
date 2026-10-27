@@ -30,7 +30,8 @@ DATA_SIZES_BY_ROM = {rom: DATA_SIZES[name] for name, rom, _, _, _ in SECTIONS}
 # [start, end) vram ranges that are not CPU code.
 EXCLUDE = [
     (0x40001080, 0x40001150),  # RSP boot microcode (0xD0 bytes), STATUS.md round 4
-    (0x4003A8B0, 0x4003E630),  # RSP microcode (graphics/audio), STATUS.md round 3
+    # From 0x4003A8C0: 0x4003A8B0 is the delay slot of func_4003A880's jr (STATUS.md round 13).
+    (0x4003A8C0, 0x4003E630),  # RSP microcode (graphics/audio), STATUS.md round 3
     # Tables inside the hand-written routines at the end of .paged, read through
     # the address of the code (bltzal $zero), STATUS.md round 4.
     (0x410D9E1C, 0x410D9E24),

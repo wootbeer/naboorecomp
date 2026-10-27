@@ -1,0 +1,54 @@
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 3d627b1..1fecee8 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -250,6 +250,12 @@ extern "C" void osStartThread(RDRAM_ARG PTR(OSThread) t_) {
+ 
+     // If this is a game thread, insert the new thread into the running queue and then check the running queue.
+     if (thread_self) {
++        // Only a stopped thread can be started: starting one that's already running, queued or
++        // waiting on a message queue would schedule it twice and run two copies of it at once.
++        if (t->state != OSThreadState::STOPPED) {
++            return;
++        }
++
+         ultramodern::schedule_running_thread(PASS_RDRAM t_);
+         ultramodern::check_running_queue(PASS_RDRAM1);
+     }
+@@ -287,12 +293,20 @@ extern "C" void osStopThread(RDRAM_ARG PTR(OSThread) t_) {
+     if (t_ == NULLPTR) {
+         t_ = thread_self;
+     }
++    OSThread* t = TO_PTR(OSThread, t_);
+     // Check if the thread is stopping itself (arg is null or thread_self).
+     if (t_ == thread_self) {
++        t->state = OSThreadState::STOPPED;
+         ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+     }
++    // Another thread: take it off the running queue, or the message queue it's waiting on,
++    // until it's started again. (Battle for Naboo pauses one of its threads this way.) A thread
++    // that was waiting on a message queue checks it again when it resumes.
+     else {
+-        assert(false);
++        if (t->queue != NULLPTR) {
++            ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
++        }
++        t->state = OSThreadState::STOPPED;
+     }
+ }
+ 
+@@ -327,9 +341,11 @@ extern "C" void osSetThreadPri(RDRAM_ARG PTR(OSThread) t_, OSPri pri) {
+     if (t->priority != pri) {
+         t->priority = pri;
+ 
+-        if (t_ != ultramodern::this_thread() && t->state != OSThreadState::STOPPED) {
+-            ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+-            ultramodern::thread_queue_insert(PASS_RDRAM t->queue, t_);
++        // Move it to its new place in the queue it's in (removing it clears its queue).
++        PTR(PTR(OSThread)) queue = t->queue;
++        if (t_ != ultramodern::this_thread() && queue != NULLPTR) {
++            ultramodern::thread_queue_remove(PASS_RDRAM queue, t_);
++            ultramodern::thread_queue_insert(PASS_RDRAM queue, t_);
+         }
+ 
+         ultramodern::check_running_queue(PASS_RDRAM1);

@@ -23,16 +23,17 @@ tooling as the BattleTanx: Global Assault port.
   release), then the game's own boot: `osInitialize` (with the clock-rate
   scaling the BattleTanx port had to find in its round 138), the memory
   setup, all of the game's threads, VI events, the video mode, the game's
-  file loader, and on into its main loop (graphics and audio tasks, frame
-  swaps, controller reads). The screen stays black: see Graphics below.
+  file loader, and on into its title screen and first 3D scenes, matching
+  the game on an emulator and without crashing (STATUS.md round 13).
 - **Audio microcode**: MusyX located and run through RSPRecomp (first pass).
 
 ## Not working yet
 
-- **Graphics**: the game draws with Factor 5's own RSP graphics microcode,
-  which stock RT64 doesn't understand. Rogue Squadron's recomp has a fork of
-  RT64 for Factor 5's microcode; Battle for Naboo uses a later version of it,
-  so this is the main piece of work before anything shows on screen.
+- **Graphics**: RT64 now recognises Factor 5's graphics microcode and runs
+  its display lists (triangles, matrices, lighting, text rectangles), but
+  the window shows white: the game's custom interlaced video mode needs
+  looking at. The terrain the microcode generates itself (commands 05/BE)
+  isn't drawn yet.
 - **Audio**: MusyX's code is longer than the RSP's instruction memory and
   wraps around; the RSPRecomp config needs that layout and its jump targets.
 - **Saves**: EEPROM through the runtime (AllowAll, 16 Kbit); not tried yet.
@@ -48,10 +49,8 @@ tooling as the BattleTanx: Global Assault port.
 
 ## Next
 
-1. Factor 5 graphics microcode in RT64. References: GLideN64's
-   implementation of the Indiana Jones / Battle for Naboo microcode (issue
-   #1259; GPL-2.0, so for how the commands work, not for code) and the
-   Rogue Squadron RT64 fork (an earlier version of the microcode).
+1. Graphics: the video mode (white screen), then the terrain commands
+   (05/BE) of Factor 5's microcode.
 2. MusyX audio microcode layout.
 3. The in-game quit prompt and UI (the per-frame UI pump).
 4. Title screen, menus and the first mission.

@@ -579,7 +579,7 @@ functions = [
     { name = "func_4003A5EC", vram = 0x4003A5EC, size = 0xDC },
     { name = "func_4003A6D0", vram = 0x4003A6D0, size = 0xD8 },
     { name = "func_4003A7A8", vram = 0x4003A7A8, size = 0xD8 },
-    { name = "func_4003A880", vram = 0x4003A880, size = 0x30 },
+    { name = "func_4003A880", vram = 0x4003A880, size = 0x34 },
     { name = "osAiSetFrequency", vram = 0x4003E630, size = 0x160 },
     { name = "osAiSetNextBuffer", vram = 0x4003E790, size = 0xA4 },
     { name = "__osAiDeviceBusy", vram = 0x4003E840, size = 0x30 },

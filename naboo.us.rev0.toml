@@ -46,6 +46,14 @@ func = "func_40037A60"
 before_vram = 0x40037A7C
 text = "    { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
 
+# func_400236E4 has no return: on the N64 it runs straight on into
+# func_40023734, which is also called on its own. Recompiled functions don't
+# fall through into the next one, so do it here (from its last instruction).
+[[patches.hook]]
+func = "func_400236E4"
+before_vram = 0x40023730
+text = "    ctx->r14 = S32(0XC00 << 16); func_40023734(rdram, ctx); return;"
+
 # Debugging aid: saves RAM at chosen graphics tasks (NABOO_DUMP_GFX, see
 # src/game/gfx_dump.cpp). func_40023558 is the game's RSP task launcher.
 [[patches.hook]]

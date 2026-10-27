@@ -12,8 +12,9 @@ Unofficial, and not affiliated with the rights holders. **No game data is
 included.** You need your own dump of the game to build or play this.
 
 **Status: early work in progress, not playable yet.** The game's code is
-recompiled and boots; graphics need Factor 5's custom microcode supported in
-the renderer first. See [PROGRESS.md](PROGRESS.md).
+recompiled and runs into its title screen; the renderer now understands
+Factor 5's custom graphics microcode, but the picture isn't right yet. See
+[PROGRESS.md](PROGRESS.md).
 
 ## Game Files
 You need your own data files: Star Wars Episode I - Battle for Naboo (USA).n64
@@ -44,6 +45,12 @@ See [BUILDING.md](BUILDING.md).
   (`spimdisasm`, `rabbitizer`), used to split the ROM (`tools/splat.yaml`)
 - [n64sym](https://github.com/shygoo/n64sym) by shygoo, whose libultra
   signatures name the library functions (`tools/match_signatures.py`)
+- olivieryuyu's decoding of Factor 5's Indiana Jones / Battle for Naboo
+  graphics microcode for [GLideN64](https://github.com/gonetz/GLideN64)
+  (`F5Indi_Naboo.cpp`), which the RT64 support here follows as a description
+  of how the commands behave; no GLideN64 code is included
+- [mupen64plus](https://mupen64plus.org/), used as a reference to compare the
+  game's memory against (`tools/mupen_dump.c`, `tools/mupen_watch.c`)
 - The Rogue Squadron projects, Battle for Naboo's predecessor on the same
   Factor 5 engine, used as a reference for Factor 5's microcode and engine:
   [RogueSquadron64Recomp](https://github.com/MikeSemicolonD/RogueSquadron64Recomp)
