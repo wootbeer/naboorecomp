@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 14)
+## Overview (as of round 15)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -15,7 +15,8 @@ into its title screen and first 3D scenes, now running without crashing and
 with the same game state as on an emulator (round 13). RT64 recognises
 Factor 5's graphics microcode and runs its display lists (triangles,
 matrices, lighting, text rectangles), and the splash screen and the first
-3D scene's models show (round 14). The terrain and backgrounds the
+3D scene's models show, and the intro plays through to the Factor 5 logo
+(rounds 14-15). The terrain and backgrounds the
 microcode generates itself (commands `05`/`BE`) are next.
 
 **How the main areas got here** (the rounds to read for each):
@@ -40,6 +41,31 @@ microcode generates itself (commands `05`/`BE`) are next.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-27, round 15: the intro right way up and running on
+
+Tested on Windows after round 14: the Expansion Pak model showed, but at the
+top of the screen instead of the bottom; the next screen (the STAP and the
+N64 logo) was upside down, and froze partway through its animation.
+
+**Upside down.** Factor 5's combined matrices already give screen Y the way
+their microcode uses it, where standard microcode (and so RT64) flips it.
+The module now negates the matrix's Y output after forcing it
+(`flipMatrixY`, `lib-patches/rt64/0023`).
+
+**The freeze.** The graphics thread never finished a display list: it
+walked off the end of RAM (`0x00F19250`) through zeros. A guard that
+logged the last commands showed how: command `05` with sub-mode `0F` is 64
+bytes the first time and 8 bytes after that. The first one copies its data
+into DMEM and sets the byte at `0x37E`, and `4F` clears it again. The
+module read the flag but never set it, so the second `0F` skipped 64 bytes,
+landed in data, and took `06030603 C0C0C0C0` for a call to `0xC0C0C0`. The
+module now sets the flag (the data itself is for the terrain commands,
+still to do).
+
+Now the intro plays through: the Expansion Pak screen, the STAP shooting
+the N64 logo apart, the craft flying past, and the Factor 5 logo fading
+out. What follows is mostly dark: the terrain commands (`05`/`BE`).
 
 ## 2026-10-27, round 14: 3D models show; a Windows-only crash
 

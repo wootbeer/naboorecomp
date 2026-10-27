@@ -82,10 +82,10 @@ index 69c35d2..538d0b5 100644
          GBIFlags flags;
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
 new file mode 100644
-index 0000000..457ba8a
+index 0000000..3914680
 --- /dev/null
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,948 @@
 +//
 +// RT64
 +//
@@ -662,6 +662,14 @@ index 0000000..457ba8a
 +            }
 +        }
 +
++        // Factor 5's matrices already give screen Y pointing down, where standard microcode
++        // (and RT64) flips it, so flip the matrix's Y output back.
++        static void flipMatrixY(RSP *rsp) {
++            for (uint32_t r = 0; r < 4; r++) {
++                rsp->modelViewProjMatrix[r][1] = -rsp->modelViewProjMatrix[r][1];
++            }
++        }
++
 +        void moveMem(State *state, DisplayList **dl) {
 +            const uint32_t w0 = (*dl)->w0;
 +            const uint32_t w1 = (*dl)->w1;
@@ -680,6 +688,7 @@ index 0000000..457ba8a
 +                    break;
 +                case 0x0105C03F:
 +                    state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
++                    flipMatrixY(state->rsp.get());
 +                    break;
 +                case 0x010E403F:
 +                    loadSTMatrix();
@@ -953,7 +962,16 @@ index 0000000..457ba8a
 +                *dl = *dl + 2;
 +                break;
 +            case 0x0F:
-+                *dl = *dl + ((dmemByte(0x37E) == 0) ? 7 : 1);
++                // 64 bytes the first time (its data then stays in DMEM, flagged at 0x37E), 8 after
++                // that until 0x4F clears the flag.
++                if (dmemByte(0x37E) == 0) {
++                    dmemByte(0x37E) = 0xFF;
++                    *dl = *dl + 7;
++                }
++                else {
++                    *dl = *dl + 1;
++                }
++
 +                break;
 +            case 0x15:
 +                *dl = *dl + 3;
