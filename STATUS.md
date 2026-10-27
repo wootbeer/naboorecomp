@@ -70,10 +70,27 @@ the title screen's scene, the Naboo fly-over, the high-score screen.
   `24`, `27` load at `0x1D60`; `2A` is the environment-mapped texture
   coordinates, `12` (at `0x1AA0`) is likely the terrain polygons.
 
-**Plan.** RSPRecomp supports overlay slots, so the whole microcode can be
-recompiled and run in a test harness on captured tasks: the reference to
-check an HLE implementation of each terrain command against, values and
-all, before it goes into the RT64 module.
+**The reference: the real microcode on captured tasks.** First tried
+recompiling it with RSPRecomp's overlay slots, but its overlays don't fit
+that model: the terrain overlays (at `0x1CF0`) overwrite code that the
+`0x1D60` ones leave in place (the end of MOVEMEM's stream DMA and command
+`02` live at `0x1CF0`-`0x1D5F`), so what's in IMEM depends on the history,
+not on a fixed set of slots. Instead, `tools/rsp_reference.c` runs a task
+captured with `NABOO_DUMP_GFX` on mupen64plus's low-level RSP plugin (a
+real RSP interpreter, loaded at run time; a development tool, not part of
+the game), with a stand-in RDP that finishes instantly, and saves the RDP
+command stream. Notes: `InitiateRSP` clears DMEM and IMEM, so the task is
+loaded after it; the RDP output is a ring buffer in RAM (`output_buff`) the
+microcode hands over through `DPC_START`/`DPC_END`, waiting on
+`DPC_STATUS & 0x400` and `DPC_CURRENT` when it wraps.
+`tools/rdp_triangles.py` decodes the triangles and draws them flat: tasks
+900 and 1200 of the intro show the snowy canyon under the STAPs, the
+scenery the port doesn't draw yet (126, 573 and 897 triangles for tasks
+600, 900, 1200).
+
+**Next.** Implement `05` (`09`, `0C`, `0F`, `15`) and `BE` in the module
+from the overlays' code, checking each against the reference triangles of
+the same task.
 
 ## 2026-10-27, round 16: textures on the right faces
 
