@@ -36,6 +36,13 @@ func = "func_4003A4DC"
 before_vram = 0x4003A504
 text = "    { extern void naboo_init_os(uint8_t *rdram); naboo_init_os(rdram); }"
 
+# Debugging aid: saves RAM at chosen graphics tasks (NABOO_DUMP_GFX, see
+# src/game/gfx_dump.cpp). func_40023558 is the game's RSP task launcher.
+[[patches.hook]]
+func = "func_40023558"
+before_vram = 0x40023558
+text = "    { extern void naboo_gfx_dump(uint8_t *rdram); naboo_gfx_dump(rdram); }"
+
 # Boot stub: no COP0 (Wired, Context, Index), and fall through to its
 # `j func_4003A4DC` at 0x4000044C instead of jumping there through the
 # TLB-mapped address in $t0.

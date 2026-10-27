@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 10)
+## Overview (as of round 11)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -30,6 +30,37 @@ buffers and its first graphics task. Nothing is drawn: the game uses Factor
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-27, round 11: round 9's fix was racy; a frame capture tool
+
+**Report (owner, Windows):** still a black screen (expected), but testing
+here showed the game back at round 7's file-loader stall in most runs.
+
+Traced with a hardware watchpoint on `__osRunningThread`: right after it
+starts, thread 3 (the requester) destroys the boot thread (`func_40039960`).
+The runtime destroys another thread by waking it so it can clean itself up,
+and round 9's write ran on that wake-up, before the check that ends the
+thread: the dying boot thread set `__osRunningThread` to itself while thread
+3 was running, and thread 3's request then went out with no sender. Round 10
+only got through because the timing went the other way. The write now comes
+after the check (`lib-patches/N64ModernRuntime/0004`). Three runs in a row
+reach the graphics tasks.
+
+**Frame capture** (`src/game/gfx_dump.cpp`): `NABOO_DUMP_GFX=5,30` (task
+numbers) saves the N64's RAM, big-endian, and the task at those graphics
+tasks, to `NABOO_DUMP_DIR`. Hooked at the start of the game's RSP task
+launcher, `func_40023558`. First captures, task at `0x4004D9B0`:
+
+| OSTask field | value |
+|---|---|
+| type, flags | 1 (M_GFXTASK), 0 |
+| ucode_boot, size | `0x4003A8C0`, 0x1000 (the microcode itself) |
+| ucode, size | `0x4003A8C0`, 0x1000 |
+| ucode_data, size | `0x4004E8E0`, 0xEC |
+| dram_stack, size | 0, 0x400 |
+| output_buff, end | `0x8068B000`, `0x806AAFF0` (RDP commands go to RAM, 128 KB) |
+| data_ptr (display list) | `0x80659318` (task 5), `0x80659108` (task 30) |
+| yield_data_ptr | `0x800CA8B0` |
 
 ## 2026-10-26, round 10: the first graphics task, and GLideN64
 
