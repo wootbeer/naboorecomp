@@ -1,0 +1,2708 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cd16f1c..431c13e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -329,6 +329,7 @@ set (SOURCES
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex2.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dgolden.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dnaboo.cpp"
++    "${PROJECT_SOURCE_DIR}/src/gbi/rt64_rsp_interpreter.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dpd.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dwave.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dzex2.cpp"
+@@ -431,6 +432,15 @@ if (WIN32)
+     include_directories("${PROJECT_SOURCE_DIR}/src/contrib/dxc/inc")
+ endif()
+ 
++# The RSP interpreter's vector unit (from ares) uses SSE4.1 and type punning.
++if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
++    if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
++        set_source_files_properties("${PROJECT_SOURCE_DIR}/src/gbi/rt64_rsp_interpreter.cpp" PROPERTIES COMPILE_OPTIONS "/clang:-msse4.1;/clang:-fno-strict-aliasing")
++    elseif (NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
++        set_source_files_properties("${PROJECT_SOURCE_DIR}/src/gbi/rt64_rsp_interpreter.cpp" PROPERTIES COMPILE_OPTIONS "-msse4.1;-fno-strict-aliasing")
++    endif()
++endif()
++
+ if (${RT64_STATIC})
+     add_library(rt64 STATIC ${SOURCES})
+ else()
+diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
+index 737b013..97091f7 100644
+--- a/src/gbi/rt64_gbi_f3dnaboo.cpp
++++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
+@@ -7,13 +7,17 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
++#include <vector>
+ 
+ #include "hle/rt64_interpreter.h"
+ 
+ #include "rt64_gbi_extended.h"
+ #include "rt64_gbi_f3d.h"
+ #include "rt64_gbi_rdp.h"
++#include "rt64_rsp_interpreter.h"
+ 
+ // How the microcode's commands behave was worked out by olivieryuyu for
+ // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
+@@ -91,15 +95,354 @@ namespace RT64 {
+             *dl = rdramDisplayList(state, address);
+         }
+ 
+-        void beginDisplayList(State *state, DisplayList **dl) {
++        // Running the microcode itself.
++        //
++        // The commands that generate the terrain (0x05 and 0xBE) are carried out by
++        // overlays that the microcode loads into IMEM as it needs them, so RT64 runs
++        // the microcode in an RSP interpreter and draws the RDP commands it produces.
++        // RT64_NABOO_HLE=1 goes back to the HLE implementation of the commands below.
++
++        // Where the microcode is told its RDP command buffer is: past the end of RDRAM,
++        // so the interpreter keeps the commands in memory of its own.
++        constexpr uint32_t OutputBufferAddress = 0xC00000;
++        constexpr uint32_t OutputBufferSize = 0x40000;
++
++        static RSPInterpreter *rspInterpreter = nullptr;
++        static std::vector<uint8_t> rspOutputBuffer;
++
++        static bool useInterpreter() {
++            static const bool useHLE = []() {
++                const char *value = getenv("RT64_NABOO_HLE");
++                return (value != nullptr) && (value[0] == '1');
++            }();
++
++            return !useHLE;
++        }
++
++        static void interpreterRDPCommands(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) {
++            State *state = reinterpret_cast<State *>(userData);
++            if ((start < OutputBufferAddress) || (end > OutputBufferAddress + OutputBufferSize)) {
++                return;
++            }
++
++            DisplayList *dlStart = reinterpret_cast<DisplayList *>(&rspOutputBuffer[start - OutputBufferAddress]);
++            DisplayList *dlEnd = reinterpret_cast<DisplayList *>(&rspOutputBuffer[end - OutputBufferAddress]);
++            state->ext.interpreter->processRDPLists(start, dlStart, dlEnd);
++        }
++
++        static void setTriangleVertex(State *state, uint32_t index, uint32_t color, bool textured, float s, float t);
++        static void flipMatrixY(RSP *rsp);
++
++        // Triangles in 3D.
++        //
++        // Drawing the RDP triangles the microcode produces would give RT64 nothing but
++        // screen positions. Instead, the interpreter stops at the microcode's vertex
++        // transform to load the same vertices (and matrix) into RT64, and at its triangle
++        // routine to draw the triangle from them. Everything else the microcode does
++        // (lighting, texture coordinates, its other RDP commands) carries on as written.
++        // Still in progress (textures come out wrong), so it's off unless RT64_NABOO_3D_TRIANGLES=1;
++        // otherwise RT64 draws the microcode's own RDP triangles.
++
++        // IMEM addresses (as the interpreter sees them, within the 4 KB of IMEM).
++        constexpr uint32_t HookTriangle = 0x1A8;            // 0x040011A8: the triangle routine, $11-$13 its vertices.
++        constexpr uint32_t HookTransformFirst = 0x890;      // 0x04001890: loads the first two vertices to transform.
++        constexpr uint32_t HookTransformNext = 0x95C;       // 0x0400195C: loads the next two.
++
++        // The RDP commands the microcode keeps in DMEM until it sends them.
++        constexpr uint32_t RDPStagingAddress = 0xE80;
++        constexpr uint32_t RDPStagingEnd = 0xF80;
++
++        constexpr uint32_t VertexSlotCount = (0xD40 - VertexBufferAddress) / VertexBufferStride;
++
++        struct HookedVertex {
++            uint32_t generation = 0;
++
++            // Where the transform will put it in clip space, to check the vertex in DMEM is still this one.
++            float clip[4] = {};
++        };
++
++        static HookedVertex hookedVertices[VertexSlotCount];
++        static uint32_t hookGeneration = 0;
++        static uint8_t hookMatrixData[0x40];
++        static float hookMatrix[4][4];
++        static bool hookMatrixLoaded = false;
++        static uint8_t hookViewportData[0x10];
++        static bool hookViewportLoaded = false;
++
++        static bool useTriangleHooks() {
++            static const bool use3DTriangles = []() {
++                const char *value = getenv("RT64_NABOO_3D_TRIANGLES");
++                return (value != nullptr) && (value[0] == '1');
++            }();
++
++            return use3DTriangles;
++        }
++
++        static float dmemFixed(uint32_t intAddress, uint32_t fracAddress) {
++            const int32_t value = int32_t((uint32_t(dmemHalf(intAddress)) << 16) | dmemHalf(fracAddress));
++            return float(value) / 65536.0f;
++        }
++
++        // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
++        static void loadHookMatrix(State *state) {
++            if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
++                return;
++            }
++
++            memcpy(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData));
++            for (uint32_t r = 0; r < 4; r++) {
++                for (uint32_t c = 0; c < 4; c++) {
++                    const uint32_t offset = (r * 4 + c) * 2;
++                    hookMatrix[r][c] = dmemFixed(0x5C0 + offset, 0x5E0 + offset);
++                }
++            }
++
++            state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
++            flipMatrixY(state->rsp.get());
++            hookMatrixLoaded = true;
++        }
++
++        static bool vertexSlot(uint32_t address, uint32_t &slot) {
++            address &= 0xFFF;
++            if ((address < VertexBufferAddress) || (((address - VertexBufferAddress) % VertexBufferStride) != 0)) {
++                return false;
++            }
++
++            slot = (address - VertexBufferAddress) / VertexBufferStride;
++            return slot < VertexSlotCount;
++        }
++
++        // At the transform's loads of two model space vertices: $13 points to them, $9 to
++        // where the first of the two goes ($9 + 0x50 for the loads ahead of the loop's next pass),
++        // and $10 counts the vertices left.
++        static void hookTransform(RSPInterpreter *rsp, State *state, bool next) {
++            const uint32_t input = rsp->gpr[13];
++            const uint32_t output = rsp->gpr[9] + (next ? 0x50 : 0);
++            const int32_t left = int32_t(rsp->gpr[10]);
++            const int32_t count = next ? ((left > 0) ? std::min(left, 2) : 0) : std::min(left, 2);
++            if (count <= 0) {
++                return;
++            }
++
++            loadHookMatrix(state);
++
++            // RT64 picks up lighting, fog and texture generation from the geometry mode when vertices
++            // are loaded. The microcode has done its own lighting and texture coordinates.
++            RSP *rt64Rsp = state->rsp.get();
++            const uint32_t savedGeometryMode = rt64Rsp->geometryModeStack[rt64Rsp->geometryModeStackSize - 1];
++            rt64Rsp->modifyGeometryMode(0, rsp->gpr[21] & 0x7);
++
++            const int16_t offset[3] = { int16_t(dmemHalf(0x128)), int16_t(dmemHalf(0x12A)), int16_t(dmemHalf(0x12C)) };
++            for (int32_t i = 0; i < count; i++) {
++                uint32_t slot;
++                if (!vertexSlot(output + i * VertexBufferStride, slot)) {
++                    continue;
++                }
++
++                RSP::Vertex vertex = {};
++                vertex.x = int16_t(dmemHalf(input + i * 8 + 0) + offset[0]);
++                vertex.y = int16_t(dmemHalf(input + i * 8 + 2) + offset[1]);
++                vertex.z = int16_t(dmemHalf(input + i * 8 + 4) + offset[2]);
++                state->rsp->setVertexFromData(&vertex, 1, slot);
++
++                HookedVertex &hooked = hookedVertices[slot];
++                hooked.generation = hookGeneration;
++                for (uint32_t c = 0; c < 4; c++) {
++                    hooked.clip[c] = vertex.x * hookMatrix[0][c] + vertex.y * hookMatrix[1][c] + vertex.z * hookMatrix[2][c] + hookMatrix[3][c];
++                }
++            }
++
++            rt64Rsp->modifyGeometryMode(0, savedGeometryMode);
++        }
++
++        // Whether the vertex in DMEM is still the one loaded into RT64 for its slot.
++        static bool hookedVertexValid(uint32_t address, uint32_t slot) {
++            const HookedVertex &hooked = hookedVertices[slot];
++            if (hooked.generation != hookGeneration) {
++                return false;
++            }
++
++            for (uint32_t c = 0; c < 4; c++) {
++                const float clip = dmemFixed(address + c * 2, address + 8 + c * 2);
++                const float tolerance = 1.0f + std::fabs(hooked.clip[c]) * (1.0f / 256.0f);
++                if (std::fabs(clip - hooked.clip[c]) > tolerance) {
++                    return false;
++                }
++            }
++
++            return true;
++        }
++
++        // Hands RT64 the RDP commands waiting in DMEM, so they come before the triangle.
++        static void sendStagedRDPCommands(RSPInterpreter *rsp, State *state) {
++            const uint32_t end = rsp->gpr[16] & 0xFFF;
++            if ((end <= RDPStagingAddress) || (end > RDPStagingEnd)) {
++                return;
++            }
++
++            DisplayList commands[(RDPStagingEnd - RDPStagingAddress) / 8];
++            const uint32_t count = (end - RDPStagingAddress) / 8;
++            for (uint32_t i = 0; i < count; i++) {
++                commands[i].w0 = dmemWord(RDPStagingAddress + i * 8);
++                commands[i].w1 = dmemWord(RDPStagingAddress + i * 8 + 4);
++            }
++
++            state->ext.interpreter->processRDPLists(0, commands, commands + count);
++            rsp->gpr[16] = RDPStagingAddress;
++        }
++
++        // At the triangle routine: $11, $12 and $13 point to its vertices in DMEM.
++        static bool hookTriangle(RSPInterpreter *rsp, State *state) {
++            const uint32_t addresses[3] = { rsp->gpr[11] & 0xFFF, rsp->gpr[12] & 0xFFF, rsp->gpr[13] & 0xFFF };
++            uint32_t slots[3];
++            for (uint32_t i = 0; i < 3; i++) {
++                if (!vertexSlot(addresses[i], slots[i]) || !hookedVertexValid(addresses[i], slots[i])) {
++                    // Not from the transform: the microcode draws it.
++                    return false;
++                }
++            }
++
++            const uint32_t returnAddress = rsp->gpr[31];
++            const uint32_t geometryMode = rsp->gpr[21];
++
++            // All three outside the same side of the screen.
++            const uint32_t outside = dmemHalf(addresses[0] + 0x24) & dmemHalf(addresses[1] + 0x24) & dmemHalf(addresses[2] + 0x24);
++            if ((outside & 0x7070) != 0) {
++                rsp->setPc(returnAddress);
++                return true;
++            }
++
++            // The microcode culls back faces with bit 13 of the geometry mode, from their area on
++            // screen. The same test in clip space works for triangles that cross the camera's plane.
++            if ((geometryMode & 0x2000) != 0) {
++                double v[3][3];
++                for (uint32_t i = 0; i < 3; i++) {
++                    v[i][0] = dmemFixed(addresses[i] + 0, addresses[i] + 8);
++                    v[i][1] = dmemFixed(addresses[i] + 2, addresses[i] + 10);
++                    v[i][2] = dmemFixed(addresses[i] + 6, addresses[i] + 14);
++                }
++
++                const double det =
++                    v[0][0] * (v[1][1] * v[2][2] - v[1][2] * v[2][1]) -
++                    v[0][1] * (v[1][0] * v[2][2] - v[1][2] * v[2][0]) +
++                    v[0][2] * (v[1][0] * v[2][1] - v[1][1] * v[2][0]);
++
++                const double scaleX = int16_t(dmemHalf(0x130));
++                const double scaleY = int16_t(dmemHalf(0x132));
++                if ((-scaleX * scaleY * det) < 0.0) {
++                    rsp->setPc(returnAddress);
++                    return true;
++                }
++            }
++
++            sendStagedRDPCommands(rsp, state);
++
++            RSP *rt64Rsp = state->rsp.get();
++            if (!hookViewportLoaded || (memcmp(hookViewportData, &dmem[0x130], sizeof(hookViewportData)) != 0)) {
++                memcpy(hookViewportData, &dmem[0x130], sizeof(hookViewportData));
++                rt64Rsp->setViewportFromData(reinterpret_cast<const Vp_t *>(&dmem[0x130]));
++                hookViewportLoaded = true;
++            }
++
++            // The low bits of the geometry mode are the RDP triangle's: shade, texture and depth.
++            const bool textured = (geometryMode & 0x2) != 0;
++            if (textured) {
++                DisplayList textureCommand;
++                textureCommand.w0 = dmemWord(0x148) | 0x1;
++                textureCommand.w1 = 0xFFFFFFFF;
++                DisplayList *textureDl = &textureCommand;
++                GBI_F3D::texture(state, &textureDl);
++            }
++
++            const bool perspective = (state->rdp->otherMode.textPersp() == G_TP_PERSP);
++            const float stScale = perspective ? (1.0f / 32.0f) : (1.0f / 16.0f);
++            for (uint32_t i = 0; i < 3; i++) {
++                const uint32_t color = dmemWord(addresses[i] + 0x10);
++                const uint32_t st = dmemWord(addresses[i] + 0x14);
++                setTriangleVertex(state, slots[i], color, textured, int16_t(st >> 16) * stScale, int16_t(st & 0xFFFF) * stScale);
++            }
++
++            const uint32_t savedGeometryMode = rt64Rsp->geometryModeStack[rt64Rsp->geometryModeStackSize - 1];
++            rt64Rsp->modifyGeometryMode(0, geometryMode & 0x7);
++            rt64Rsp->drawIndexedTri(slots[0], slots[1], slots[2]);
++            rt64Rsp->modifyGeometryMode(0, savedGeometryMode);
++
++            rsp->setPc(returnAddress);
++            return true;
++        }
++
++        static bool interpreterHook(RSPInterpreter *rsp, void *userData) {
++            State *state = reinterpret_cast<State *>(userData);
++            switch (rsp->pc) {
++            case HookTransformFirst:
++                hookTransform(rsp, state, false);
++                return false;
++            case HookTransformNext:
++                hookTransform(rsp, state, true);
++                return false;
++            case HookTriangle:
++                return hookTriangle(rsp, state);
++            default:
++                return false;
++            }
++        }
++
++        static void runMicrocode(State *state, uint32_t dlAddress) {
++            if (rspInterpreter == nullptr) {
++                rspInterpreter = new RSPInterpreter();
++                rspOutputBuffer.resize(OutputBufferSize);
++                rspInterpreter->outputBuffer = rspOutputBuffer.data();
++                rspInterpreter->outputBufferAddress = OutputBufferAddress;
++                rspInterpreter->outputBufferSize = OutputBufferSize;
++                rspInterpreter->rdpCommands = &interpreterRDPCommands;
++                rspInterpreter->hook = &interpreterHook;
++                if (useTriangleHooks()) {
++                    rspInterpreter->setHook(HookTriangle, true);
++                    rspInterpreter->setHook(HookTransformFirst, true);
++                    rspInterpreter->setHook(HookTransformNext, true);
++                }
++            }
++
++            RSPInterpreter *rsp = rspInterpreter;
++            rsp->rdpUserData = state;
++            rsp->hookUserData = state;
++            hookGeneration++;
++            hookMatrixLoaded = false;
++            hookViewportLoaded = false;
++            rsp->dmem = dmem;
++            rsp->rdram = state->RDRAM;
++            rsp->rdramSize = 0x800000;
++
++            // As the boot microcode leaves things: the data segment in DMEM, the first 0x1000
++            // bytes of the text in IMEM and the task's OSTask at the end of DMEM.
++            const uint32_t textAddress = state->ext.interpreter->UCode.textAddress;
+             const uint32_t dataAddress = state->ext.interpreter->UCode.dataAddress;
+             copyToDMEM(state, 0, dataAddress, UCodeDataSize);
++            const uint8_t *rdram = state->fromRDRAM(0);
++            for (uint32_t i = 0; i < 0x1000; i++) {
++                rsp->imem[i ^ 3] = rdram[((textAddress + i) & 0x7FFFFF) ^ 3];
++            }
+ 
+-            const uint32_t clearedWords[] = { 0x11C, 0x120, 0x124, 0x37C, 0x58C, 0x5B0, 0x5B4 };
+-            for (uint32_t address : clearedWords) {
+-                dmemWord(address) = 0;
++            const uint32_t task[16] = {
++                1, 0, 0x80000000 | textAddress, 0x1000,
++                0x80000000 | textAddress, 0x1000, 0x80000000 | dataAddress, UCodeDataSize,
++                0, 0x400, 0x80000000 | OutputBufferAddress, 0x80000000 | (OutputBufferAddress + OutputBufferSize - 0x10),
++                0x80000000 | dlAddress, 0, 0, 0
++            };
++
++            for (uint32_t i = 0; i < std::size(task); i++) {
++                rsp->setDMEMWord(0xFC0 + i * 4, task[i]);
+             }
+ 
++            memset(rsp->gpr, 0, sizeof(rsp->gpr));
++            rsp->setPc(0);
++            const RSPInterpreter::Result result = rsp->run(200000000ULL);
++            if (result != RSPInterpreter::Result::Broke) {
++                fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
++            }
++        }
++
++        void beginDisplayList(State *state, DisplayList **dl) {
+             // The microcode only ever takes the combined model-view-projection matrix (forced
+             // through RSP::forceMatrixFromData), so the projection RT64 composes with is the identity.
+             RSP *rsp = state->rsp.get();
+@@ -111,6 +454,20 @@ namespace RT64 {
+             rsp->projectionMatrixInversed = true;
+             rsp->projectionMatrixChanged = true;
+ 
++            if (useInterpreter()) {
++                runMicrocode(state, state->displayListAddress);
++                *dl = nullptr;
++                return;
++            }
++
++            const uint32_t dataAddress = state->ext.interpreter->UCode.dataAddress;
++            copyToDMEM(state, 0, dataAddress, UCodeDataSize);
++
++            const uint32_t clearedWords[] = { 0x11C, 0x120, 0x124, 0x37C, 0x58C, 0x5B0, 0x5B4 };
++            for (uint32_t address : clearedWords) {
++                dmemWord(address) = 0;
++            }
++
+             // The task's display list starts with a chunk header.
+             nextChunkStack.clear();
+             nextChunkStack.push_back((*dl)->w0 & 0xFFFFFF);
+diff --git a/src/gbi/rt64_rsp_interpreter.cpp b/src/gbi/rt64_rsp_interpreter.cpp
+new file mode 100644
+index 0000000..474b593
+--- /dev/null
++++ b/src/gbi/rt64_rsp_interpreter.cpp
+@@ -0,0 +1,437 @@
++//
++// RT64
++//
++
++#include "rt64_rsp_interpreter.h"
++
++#include <cstring>
++
++namespace RT64 {
++    namespace RSPVU {
++        uint8_t *dmem = nullptr;
++        uint16_t rspReciprocals[512];
++        uint16_t rspInverseSquareRoots[512];
++
++        // From ares (see rt64_rsp_vu.h for its license).
++        static void initConstants() {
++            static bool initialized = false;
++            if (initialized) {
++                return;
++            }
++
++            rspReciprocals[0] = u16(~0);
++            for (u16 index = 1; index < 512; index++) {
++                u64 a = index + 512;
++                u64 b = (u64(1) << 34) / a;
++                rspReciprocals[index] = u16((b + 1) >> 8);
++            }
++
++            for (u16 index = 0; index < 512; index++) {
++                u64 a = (index + 512) >> ((index % 2 == 1) ? 1 : 0);
++                u64 b = 1 << 17;
++                while (a * (b + 1) * (b + 1) < (u64(1) << 44)) b++;
++                rspInverseSquareRoots[index] = u16(b >> 1);
++            }
++
++            initialized = true;
++        }
++    };
++
++    // Calls a vector unit function with the instruction's element as its template argument.
++#define RSP_ELEMENT_SWITCH(e, call) \
++    switch (e) { \
++    case 0: { constexpr uint8_t E = 0; call; break; } \
++    case 1: { constexpr uint8_t E = 1; call; break; } \
++    case 2: { constexpr uint8_t E = 2; call; break; } \
++    case 3: { constexpr uint8_t E = 3; call; break; } \
++    case 4: { constexpr uint8_t E = 4; call; break; } \
++    case 5: { constexpr uint8_t E = 5; call; break; } \
++    case 6: { constexpr uint8_t E = 6; call; break; } \
++    case 7: { constexpr uint8_t E = 7; call; break; } \
++    case 8: { constexpr uint8_t E = 8; call; break; } \
++    case 9: { constexpr uint8_t E = 9; call; break; } \
++    case 10: { constexpr uint8_t E = 10; call; break; } \
++    case 11: { constexpr uint8_t E = 11; call; break; } \
++    case 12: { constexpr uint8_t E = 12; call; break; } \
++    case 13: { constexpr uint8_t E = 13; call; break; } \
++    case 14: { constexpr uint8_t E = 14; call; break; } \
++    default: { constexpr uint8_t E = 15; call; break; } \
++    }
++
++    RSPInterpreter::RSPInterpreter() {
++        RSPVU::initConstants();
++        reset();
++    }
++
++    void RSPInterpreter::reset() {
++        memset(&vu.vpu, 0, sizeof(vu.vpu));
++        memset(gpr, 0, sizeof(gpr));
++        pc = 0;
++        nextPc = 4;
++        dmaMemAddress = 0;
++        dmaDramAddress = 0;
++        dpcStart = dpcEnd = dpcCurrent = 0;
++    }
++
++    void RSPInterpreter::setHook(uint32_t imemAddress, bool enabled) {
++        hooks[(imemAddress & 0xFFF) >> 2] = enabled;
++    }
++
++    void RSPInterpreter::setPc(uint32_t address) {
++        pc = address & 0xFFC;
++        nextPc = (pc + 4) & 0xFFC;
++    }
++
++    uint8_t &RSPInterpreter::dramByte(uint32_t address) {
++        address &= 0xFFFFFF;
++        if ((outputBuffer != nullptr) && (address >= outputBufferAddress) && (address < outputBufferAddress + outputBufferSize)) {
++            return outputBuffer[(address - outputBufferAddress) ^ 3];
++        }
++        else if (address < rdramSize) {
++            return rdram[address ^ 3];
++        }
++        else {
++            dummyByte = 0;
++            return dummyByte;
++        }
++    }
++
++    uint32_t RSPInterpreter::dmemWord(uint32_t address) const {
++        uint32_t value;
++        memcpy(&value, &dmem[address & 0xFFC], sizeof(value));
++        return value;
++    }
++
++    void RSPInterpreter::setDMEMWord(uint32_t address, uint32_t value) {
++        memcpy(&dmem[address & 0xFFC], &value, sizeof(value));
++    }
++
++    uint32_t RSPInterpreter::imemWord(uint32_t address) const {
++        uint32_t value;
++        memcpy(&value, &imem[address & 0xFFC], sizeof(value));
++        return value;
++    }
++
++    void RSPInterpreter::dma(uint32_t length, bool write) {
++        // The length register: the bytes in each row minus one, the number of rows minus one, and the skip between rows in RDRAM.
++        const uint32_t rowLength = ((length & 0xFFF) | 7) + 1;
++        const uint32_t rowCount = ((length >> 12) & 0xFF) + 1;
++        const uint32_t skip = (length >> 20) & 0xFF8;
++        uint8_t *mem = (dmaMemAddress & 0x1000) ? imem : dmem;
++        uint32_t memAddress = dmaMemAddress & 0xFF8;
++        uint32_t dramAddress = dmaDramAddress & 0xFFFFF8;
++        for (uint32_t row = 0; row < rowCount; row++) {
++            for (uint32_t i = 0; i < rowLength; i++) {
++                uint8_t &memByte = mem[((memAddress + i) & 0xFFF) ^ 3];
++                uint8_t &dram = dramByte(dramAddress + i);
++                if (write) {
++                    dram = memByte;
++                }
++                else {
++                    memByte = dram;
++                }
++            }
++
++            memAddress += rowLength;
++            dramAddress += rowLength + skip;
++        }
++
++        dmaMemAddress = (dmaMemAddress & 0x1000) | (memAddress & 0xFF8);
++        dmaDramAddress = dramAddress;
++    }
++
++    uint32_t RSPInterpreter::readCop0(uint32_t index) {
++        switch (index & 0xF) {
++        case 0:
++            return dmaMemAddress;
++        case 1:
++            return dmaDramAddress;
++        case 8:
++            return dpcStart;
++        case 9:
++            return dpcEnd;
++        case 10:
++            return dpcCurrent;
++        default:
++            // Nothing is busy or pending: DMAs and the RDP finish at once, no signals are set,
++            // and the semaphore is free.
++            return 0;
++        }
++    }
++
++    void RSPInterpreter::writeCop0(uint32_t index, uint32_t value) {
++        switch (index & 0xF) {
++        case 0:
++            dmaMemAddress = value & 0x1FF8;
++            break;
++        case 1:
++            dmaDramAddress = value & 0xFFFFF8;
++            break;
++        case 2:
++            dma(value, false);
++            break;
++        case 3:
++            dma(value, true);
++            break;
++        case 8:
++            dpcStart = value & 0xFFFFF8;
++            dpcCurrent = dpcStart;
++            break;
++        case 9:
++            dpcEnd = value & 0xFFFFF8;
++            if ((rdpCommands != nullptr) && (dpcEnd > dpcCurrent)) {
++                rdpCommands(this, dpcCurrent, dpcEnd, rdpUserData);
++            }
++
++            dpcCurrent = dpcEnd;
++            break;
++        default:
++            break;
++        }
++    }
++
++    void RSPInterpreter::executeVectorLoadStore(uint32_t instr, bool store) {
++        const uint32_t base = gpr[(instr >> 21) & 0x1F];
++        const uint32_t vt = (instr >> 16) & 0x1F;
++        const uint32_t op = (instr >> 11) & 0x1F;
++        const uint32_t e = (instr >> 7) & 0xF;
++        const int8_t offset = int8_t(uint8_t(instr << 1)) >> 1;
++        RSPVU::RSP::r128 &v = vu.vpu.r[vt];
++        if (store) {
++            switch (op) {
++            case 0x00: RSP_ELEMENT_SWITCH(e, vu.SBV<E>(v, base, offset)); break;
++            case 0x01: RSP_ELEMENT_SWITCH(e, vu.SSV<E>(v, base, offset)); break;
++            case 0x02: RSP_ELEMENT_SWITCH(e, vu.SLV<E>(v, base, offset)); break;
++            case 0x03: RSP_ELEMENT_SWITCH(e, vu.SDV<E>(v, base, offset)); break;
++            case 0x04: RSP_ELEMENT_SWITCH(e, vu.SQV<E>(v, base, offset)); break;
++            case 0x05: RSP_ELEMENT_SWITCH(e, vu.SRV<E>(v, base, offset)); break;
++            case 0x06: RSP_ELEMENT_SWITCH(e, vu.SPV<E>(v, base, offset)); break;
++            case 0x07: RSP_ELEMENT_SWITCH(e, vu.SUV<E>(v, base, offset)); break;
++            case 0x08: RSP_ELEMENT_SWITCH(e, vu.SHV<E>(v, base, offset)); break;
++            case 0x09: RSP_ELEMENT_SWITCH(e, vu.SFV<E>(v, base, offset)); break;
++            case 0x0A: RSP_ELEMENT_SWITCH(e, vu.SWV<E>(v, base, offset)); break;
++            case 0x0B: RSP_ELEMENT_SWITCH(e, vu.STV<E>(uint8_t(vt), base, offset)); break;
++            default: break;
++            }
++        }
++        else {
++            switch (op) {
++            case 0x00: RSP_ELEMENT_SWITCH(e, vu.LBV<E>(v, base, offset)); break;
++            case 0x01: RSP_ELEMENT_SWITCH(e, vu.LSV<E>(v, base, offset)); break;
++            case 0x02: RSP_ELEMENT_SWITCH(e, vu.LLV<E>(v, base, offset)); break;
++            case 0x03: RSP_ELEMENT_SWITCH(e, vu.LDV<E>(v, base, offset)); break;
++            case 0x04: RSP_ELEMENT_SWITCH(e, vu.LQV<E>(v, base, offset)); break;
++            case 0x05: RSP_ELEMENT_SWITCH(e, vu.LRV<E>(v, base, offset)); break;
++            case 0x06: RSP_ELEMENT_SWITCH(e, vu.LPV<E>(v, base, offset)); break;
++            case 0x07: RSP_ELEMENT_SWITCH(e, vu.LUV<E>(v, base, offset)); break;
++            case 0x08: RSP_ELEMENT_SWITCH(e, vu.LHV<E>(v, base, offset)); break;
++            case 0x09: RSP_ELEMENT_SWITCH(e, vu.LFV<E>(v, base, offset)); break;
++            case 0x0A: RSP_ELEMENT_SWITCH(e, vu.LWV<E>(v, base, offset)); break;
++            case 0x0B: RSP_ELEMENT_SWITCH(e, vu.LTV<E>(uint8_t(vt), base, offset)); break;
++            default: break;
++            }
++        }
++    }
++
++    void RSPInterpreter::executeCop2(uint32_t instr) {
++        const uint32_t rt = (instr >> 16) & 0x1F;
++        if ((instr & (1U << 25)) == 0) {
++            const uint32_t rd = (instr >> 11) & 0x1F;
++            const uint32_t e = (instr >> 7) & 0xF;
++            RSPVU::RSP::r128 &vs = vu.vpu.r[rd];
++            uint32_t value = gpr[rt];
++            switch ((instr >> 21) & 0x1F) {
++            case 0x00:
++                RSP_ELEMENT_SWITCH(e, vu.MFC2<E>(value, vs));
++                if (rt != 0) {
++                    gpr[rt] = value;
++                }
++
++                break;
++            case 0x02:
++                vu.CFC2(value, uint8_t(rd));
++                if (rt != 0) {
++                    gpr[rt] = value;
++                }
++
++                break;
++            case 0x04:
++                RSP_ELEMENT_SWITCH(e, vu.MTC2<E>(value, vs));
++                break;
++            case 0x06:
++                vu.CTC2(value, uint8_t(rd));
++                break;
++            default:
++                break;
++            }
++
++            return;
++        }
++
++        const uint32_t e = (instr >> 21) & 0xF;
++        const uint32_t vsIndex = (instr >> 11) & 0x1F;
++        RSPVU::RSP::r128 &vd = vu.vpu.r[(instr >> 6) & 0x1F];
++        RSPVU::RSP::r128 &vs = vu.vpu.r[vsIndex];
++        RSPVU::RSP::r128 &vt = vu.vpu.r[rt];
++        const uint8_t de = uint8_t(vsIndex & 7);
++        switch (instr & 0x3F) {
++        case 0x00: RSP_ELEMENT_SWITCH(e, vu.VMULF<E>(vd, vs, vt)); break;
++        case 0x01: RSP_ELEMENT_SWITCH(e, vu.VMULU<E>(vd, vs, vt)); break;
++        case 0x02: RSP_ELEMENT_SWITCH(e, vu.VRNDP<E>(vd, uint8_t(vsIndex), vt)); break;
++        case 0x03: RSP_ELEMENT_SWITCH(e, vu.VMULQ<E>(vd, vs, vt)); break;
++        case 0x04: RSP_ELEMENT_SWITCH(e, vu.VMUDL<E>(vd, vs, vt)); break;
++        case 0x05: RSP_ELEMENT_SWITCH(e, vu.VMUDM<E>(vd, vs, vt)); break;
++        case 0x06: RSP_ELEMENT_SWITCH(e, vu.VMUDN<E>(vd, vs, vt)); break;
++        case 0x07: RSP_ELEMENT_SWITCH(e, vu.VMUDH<E>(vd, vs, vt)); break;
++        case 0x08: RSP_ELEMENT_SWITCH(e, vu.VMACF<E>(vd, vs, vt)); break;
++        case 0x09: RSP_ELEMENT_SWITCH(e, vu.VMACU<E>(vd, vs, vt)); break;
++        case 0x0A: RSP_ELEMENT_SWITCH(e, vu.VRNDN<E>(vd, uint8_t(vsIndex), vt)); break;
++        case 0x0B: vu.VMACQ(vd); break;
++        case 0x0C: RSP_ELEMENT_SWITCH(e, vu.VMADL<E>(vd, vs, vt)); break;
++        case 0x0D: RSP_ELEMENT_SWITCH(e, vu.VMADM<E>(vd, vs, vt)); break;
++        case 0x0E: RSP_ELEMENT_SWITCH(e, vu.VMADN<E>(vd, vs, vt)); break;
++        case 0x0F: RSP_ELEMENT_SWITCH(e, vu.VMADH<E>(vd, vs, vt)); break;
++        case 0x10: RSP_ELEMENT_SWITCH(e, vu.VADD<E>(vd, vs, vt)); break;
++        case 0x11: RSP_ELEMENT_SWITCH(e, vu.VSUB<E>(vd, vs, vt)); break;
++        case 0x13: RSP_ELEMENT_SWITCH(e, vu.VABS<E>(vd, vs, vt)); break;
++        case 0x14: RSP_ELEMENT_SWITCH(e, vu.VADDC<E>(vd, vs, vt)); break;
++        case 0x15: RSP_ELEMENT_SWITCH(e, vu.VSUBC<E>(vd, vs, vt)); break;
++        case 0x1D: RSP_ELEMENT_SWITCH(e, vu.VSAR<E>(vd, vs)); break;
++        case 0x20: RSP_ELEMENT_SWITCH(e, vu.VLT<E>(vd, vs, vt)); break;
++        case 0x21: RSP_ELEMENT_SWITCH(e, vu.VEQ<E>(vd, vs, vt)); break;
++        case 0x22: RSP_ELEMENT_SWITCH(e, vu.VNE<E>(vd, vs, vt)); break;
++        case 0x23: RSP_ELEMENT_SWITCH(e, vu.VGE<E>(vd, vs, vt)); break;
++        case 0x24: RSP_ELEMENT_SWITCH(e, vu.VCL<E>(vd, vs, vt)); break;
++        case 0x25: RSP_ELEMENT_SWITCH(e, vu.VCH<E>(vd, vs, vt)); break;
++        case 0x26: RSP_ELEMENT_SWITCH(e, vu.VCR<E>(vd, vs, vt)); break;
++        case 0x27: RSP_ELEMENT_SWITCH(e, vu.VMRG<E>(vd, vs, vt)); break;
++        case 0x28: RSP_ELEMENT_SWITCH(e, vu.VAND<E>(vd, vs, vt)); break;
++        case 0x29: RSP_ELEMENT_SWITCH(e, vu.VNAND<E>(vd, vs, vt)); break;
++        case 0x2A: RSP_ELEMENT_SWITCH(e, vu.VOR<E>(vd, vs, vt)); break;
++        case 0x2B: RSP_ELEMENT_SWITCH(e, vu.VNOR<E>(vd, vs, vt)); break;
++        case 0x2C: RSP_ELEMENT_SWITCH(e, vu.VXOR<E>(vd, vs, vt)); break;
++        case 0x2D: RSP_ELEMENT_SWITCH(e, vu.VNXOR<E>(vd, vs, vt)); break;
++        case 0x30: RSP_ELEMENT_SWITCH(e, vu.VRCP<E>(vd, de, vt)); break;
++        case 0x31: RSP_ELEMENT_SWITCH(e, vu.VRCPL<E>(vd, de, vt)); break;
++        case 0x32: RSP_ELEMENT_SWITCH(e, vu.VRCPH<E>(vd, de, vt)); break;
++        case 0x33: RSP_ELEMENT_SWITCH(e, vu.VMOV<E>(vd, de, vt)); break;
++        case 0x34: RSP_ELEMENT_SWITCH(e, vu.VRSQ<E>(vd, de, vt)); break;
++        case 0x35: RSP_ELEMENT_SWITCH(e, vu.VRSQL<E>(vd, de, vt)); break;
++        case 0x36: RSP_ELEMENT_SWITCH(e, vu.VRSQH<E>(vd, de, vt)); break;
++        case 0x37:
++        case 0x3F:
++            break;
++        default:
++            // The unused encodings act like VZERO: the accumulator's low lanes get vs + vt and vd is cleared.
++            RSP_ELEMENT_SWITCH(e, vu.VZERO<E>(vd, vs, vt));
++            break;
++        }
++    }
++
++    RSPInterpreter::Result RSPInterpreter::run(uint64_t maxInstructions) {
++        RSPVU::dmem = dmem;
++        auto loadByte = [this](uint32_t address) -> uint8_t { return dmem[(address & 0xFFF) ^ 3]; };
++        auto storeByte = [this](uint32_t address, uint8_t value) { dmem[(address & 0xFFF) ^ 3] = value; };
++        for (uint64_t count = 0; count < maxInstructions; count++) {
++            if (hooks[pc >> 2] && (hook != nullptr) && hook(this, hookUserData)) {
++                continue;
++            }
++
++            const uint32_t instr = imemWord(pc);
++            const uint32_t current = pc;
++            pc = nextPc;
++            nextPc = (nextPc + 4) & 0xFFC;
++
++            const uint32_t rs = (instr >> 21) & 0x1F;
++            const uint32_t rt = (instr >> 16) & 0x1F;
++            const uint32_t rd = (instr >> 11) & 0x1F;
++            const uint32_t sa = (instr >> 6) & 0x1F;
++            const uint32_t immU = instr & 0xFFFF;
++            const int32_t imm = int16_t(immU);
++            const uint32_t s = gpr[rs];
++            const uint32_t t = gpr[rt];
++            const uint32_t branchTarget = (current + 4 + (uint32_t(imm) << 2)) & 0xFFC;
++            const uint32_t address = s + uint32_t(imm);
++            uint32_t result = 0;
++            uint32_t dest = 0;
++            switch (instr >> 26) {
++            case 0x00:
++                dest = rd;
++                switch (instr & 0x3F) {
++                case 0x00: result = t << sa; break;
++                case 0x02: result = t >> sa; break;
++                case 0x03: result = uint32_t(int32_t(t) >> sa); break;
++                case 0x04: result = t << (s & 31); break;
++                case 0x06: result = t >> (s & 31); break;
++                case 0x07: result = uint32_t(int32_t(t) >> (s & 31)); break;
++                case 0x08: nextPc = s & 0xFFC; dest = 0; break;
++                case 0x09: nextPc = s & 0xFFC; result = (current + 8) & 0xFFC; break;
++                case 0x0D: return Result::Broke;
++                case 0x20: case 0x21: result = s + t; break;
++                case 0x22: case 0x23: result = s - t; break;
++                case 0x24: result = s & t; break;
++                case 0x25: result = s | t; break;
++                case 0x26: result = s ^ t; break;
++                case 0x27: result = ~(s | t); break;
++                case 0x2A: result = (int32_t(s) < int32_t(t)) ? 1 : 0; break;
++                case 0x2B: result = (s < t) ? 1 : 0; break;
++                default: dest = 0; break;
++                }
++
++                break;
++            case 0x01:
++                switch (rt) {
++                case 0x00: if (int32_t(s) < 0) nextPc = branchTarget; break;
++                case 0x01: if (int32_t(s) >= 0) nextPc = branchTarget; break;
++                case 0x10: if (int32_t(s) < 0) nextPc = branchTarget; gpr[31] = (current + 8) & 0xFFC; break;
++                case 0x11: if (int32_t(s) >= 0) nextPc = branchTarget; gpr[31] = (current + 8) & 0xFFC; break;
++                default: break;
++                }
++
++                break;
++            case 0x02: nextPc = (instr << 2) & 0xFFC; break;
++            case 0x03: nextPc = (instr << 2) & 0xFFC; gpr[31] = (current + 8) & 0xFFC; break;
++            case 0x04: if (s == t) nextPc = branchTarget; break;
++            case 0x05: if (s != t) nextPc = branchTarget; break;
++            case 0x06: if (int32_t(s) <= 0) nextPc = branchTarget; break;
++            case 0x07: if (int32_t(s) > 0) nextPc = branchTarget; break;
++            case 0x08: case 0x09: dest = rt; result = s + uint32_t(imm); break;
++            case 0x0A: dest = rt; result = (int32_t(s) < imm) ? 1 : 0; break;
++            case 0x0B: dest = rt; result = (s < uint32_t(imm)) ? 1 : 0; break;
++            case 0x0C: dest = rt; result = s & immU; break;
++            case 0x0D: dest = rt; result = s | immU; break;
++            case 0x0E: dest = rt; result = s ^ immU; break;
++            case 0x0F: dest = rt; result = immU << 16; break;
++            case 0x10:
++                if ((rs & 0x1F) == 0x00) { dest = rt; result = readCop0(rd); }
++                else if ((rs & 0x1F) == 0x04) { writeCop0(rd, t); }
++                break;
++            case 0x12: executeCop2(instr); break;
++            case 0x20: dest = rt; result = uint32_t(int8_t(loadByte(address))); break;
++            case 0x21: dest = rt; result = uint32_t(int16_t((loadByte(address) << 8) | loadByte(address + 1))); break;
++            case 0x23: dest = rt; result = (loadByte(address) << 24) | (loadByte(address + 1) << 16) | (loadByte(address + 2) << 8) | loadByte(address + 3); break;
++            case 0x24: dest = rt; result = loadByte(address); break;
++            case 0x25: dest = rt; result = (loadByte(address) << 8) | loadByte(address + 1); break;
++            case 0x27: dest = rt; result = (loadByte(address) << 24) | (loadByte(address + 1) << 16) | (loadByte(address + 2) << 8) | loadByte(address + 3); break;
++            case 0x28: storeByte(address, uint8_t(t)); break;
++            case 0x29: storeByte(address, uint8_t(t >> 8)); storeByte(address + 1, uint8_t(t)); break;
++            case 0x2B:
++                storeByte(address, uint8_t(t >> 24));
++                storeByte(address + 1, uint8_t(t >> 16));
++                storeByte(address + 2, uint8_t(t >> 8));
++                storeByte(address + 3, uint8_t(t));
++                break;
++            case 0x32: executeVectorLoadStore(instr, false); break;
++            case 0x3A: executeVectorLoadStore(instr, true); break;
++            default: break;
++            }
++
++            if (dest != 0) {
++                gpr[dest] = result;
++            }
++        }
++
++        return Result::Timeout;
++    }
++#undef RSP_ELEMENT_SWITCH
++};
+diff --git a/src/gbi/rt64_rsp_interpreter.h b/src/gbi/rt64_rsp_interpreter.h
+new file mode 100644
+index 0000000..e3cc03b
+--- /dev/null
++++ b/src/gbi/rt64_rsp_interpreter.h
+@@ -0,0 +1,77 @@
++//
++// RT64
++//
++
++#pragma once
++
++#include <cstdint>
++
++#include "rt64_rsp_vu.h"
++
++namespace RT64 {
++    // An interpreter for the RSP, for microcode that RT64 runs as written instead
++    // of reimplementing it: Battle for Naboo's terrain and polygon commands are
++    // generated by overlays that are swapped into IMEM as they're needed.
++    //
++    // DMEM and IMEM are kept in RDRAM's 32-bit word-swapped layout (byte N at N ^ 3),
++    // and so is the RDRAM it reads. The RDP is treated as always caught up: each write
++    // to DPC_END hands the commands since the last one to rdpCommands().
++    struct RSPInterpreter {
++        enum class Result {
++            Broke,
++            Halted,
++            Timeout
++        };
++
++        RSPVU::RSP vu;
++        uint32_t gpr[32] = {};
++        uint32_t pc = 0;
++        uint32_t nextPc = 4;
++        uint8_t *dmem = nullptr;
++        uint8_t imem[0x1000] = {};
++
++        // The N64's RAM.
++        uint8_t *rdram = nullptr;
++        uint32_t rdramSize = 0;
++
++        // Memory for the RDP's command buffer outside of RDRAM, so the commands the
++        // microcode writes don't overwrite anything.
++        uint8_t *outputBuffer = nullptr;
++        uint32_t outputBufferAddress = 0;
++        uint32_t outputBufferSize = 0;
++
++        // Called at the instructions flagged with setHook. Returns true when it changed
++        // the program counter (with setPc) to skip what the microcode would have done.
++        bool (*hook)(RSPInterpreter *interpreter, void *userData) = nullptr;
++        void *hookUserData = nullptr;
++
++        // Called with the RDP commands between two RDRAM addresses (or in the output buffer).
++        void (*rdpCommands)(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) = nullptr;
++        void *rdpUserData = nullptr;
++
++        RSPInterpreter();
++        void reset();
++        void setHook(uint32_t imemAddress, bool enabled);
++        void setPc(uint32_t address);
++        Result run(uint64_t maxInstructions);
++        uint8_t &dramByte(uint32_t address);
++        uint32_t dmemWord(uint32_t address) const;
++        void setDMEMWord(uint32_t address, uint32_t value);
++        uint32_t imemWord(uint32_t address) const;
++
++    private:
++        uint32_t dmaMemAddress = 0;
++        uint32_t dmaDramAddress = 0;
++        uint32_t dpcStart = 0;
++        uint32_t dpcEnd = 0;
++        uint32_t dpcCurrent = 0;
++        bool hooks[0x400] = {};
++        uint8_t dummyByte = 0;
++
++        void dma(uint32_t length, bool write);
++        uint32_t readCop0(uint32_t index);
++        void writeCop0(uint32_t index, uint32_t value);
++        void executeCop2(uint32_t instr);
++        void executeVectorLoadStore(uint32_t instr, bool store);
++    };
++};
+diff --git a/src/gbi/rt64_rsp_vu.h b/src/gbi/rt64_rsp_vu.h
+new file mode 100644
+index 0000000..03f6a5d
+--- /dev/null
++++ b/src/gbi/rt64_rsp_vu.h
+@@ -0,0 +1,1746 @@
++// This file is modified from the Ares N64 emulator core. Ares can
++// be found at https://github.com/ares-emulator/ares. The original license
++// for this portion of Ares is as follows:
++// ----------------------------------------------------------------------
++// ares
++// 
++// Copyright(c) 2004 - 2021 ares team, Near et al
++// 
++// Permission to use, copy, modify, and /or distribute this software for any
++// purpose with or without fee is hereby granted, provided that the above
++// copyright noticeand this permission notice appear in all copies.
++// 
++// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++// MERCHANTABILITY AND FITNESS.IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++// ----------------------------------------------------------------------
++// Adapted for RT64 from N64ModernRuntime's librecomp (rsp_vu.hpp and
++// rsp_vu_impl.hpp): the RSP's vector unit, used by the interpreter that runs
++// Battle for Naboo's microcode (rt64_rsp_interpreter.h). It is wrapped in a
++// namespace and reads DMEM through RT64::RSPVU::dmem.
++
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++#if defined(__x86_64__) || defined(_M_X64)
++#define ARCHITECTURE_SUPPORTS_SSE4_1 1
++#include <nmmintrin.h>
++#endif
++
++#if defined(_MSC_VER) && !defined(__clang__)
++#include <intrin.h>
++static inline unsigned int rt64RSPClz(unsigned int x) { unsigned long index; _BitScanReverse(&index, x); return 31 - index; }
++#else
++static inline unsigned int rt64RSPClz(unsigned int x) { return __builtin_clz(x); }
++#endif
++
++namespace RT64 {
++namespace RSPVU {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++using v128 = __m128i;
++#endif
++
++// DMEM in RDRAM's 32-bit word-swapped layout (byte N at N ^ 3).
++extern uint8_t *dmem;
++extern uint16_t rspReciprocals[512];
++extern uint16_t rspInverseSquareRoots[512];
++
++#define RSP_MEM_B(offset, addr) \
++    (*reinterpret_cast<uint8_t*>(dmem + (0xFFF & (((offset) + (addr)) ^ 3))))
++
++
++namespace Accuracy {
++    namespace RSP {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        constexpr bool SISD = false;
++        constexpr bool SIMD = true;
++#else
++        constexpr bool SISD = true;
++        constexpr bool SIMD = false;
++#endif
++    }
++}
++
++using u8 = uint8_t;
++using s8 = int8_t;
++using u16 = uint16_t;
++using s16 = int16_t;
++using u32 = uint32_t;
++using s32 = int32_t;
++using u64 = uint64_t;
++using s64 = int64_t;
++using uint128_t = uint64_t[2];
++
++template<u32 bits> inline auto sclamp(s64 x) -> s64 {
++  enum : s64 { b = 1ull << (bits - 1), m = b - 1 };
++  return (x > m) ? m : (x < -b) ? -b : x;
++}
++
++template<u32 bits> inline auto sclip(s64 x) -> s64 {
++  enum : u64 { b = 1ull << (bits - 1), m = b * 2 - 1 };
++  return ((x & m) ^ b) - b;
++}
++
++struct RSP {
++    using r32 = uint32_t;
++    using cr32 = const r32;
++
++    union r128 {
++        struct { uint64_t u128[2]; };
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        struct {   __m128i v128; };
++
++        operator __m128i() const { return v128; }
++        auto operator=(__m128i value) { v128 = value; }
++#endif
++
++        auto byte(u32 index) -> uint8_t& { return ((uint8_t*)&u128)[15 - index]; }
++        auto byte(u32 index) const -> uint8_t { return ((uint8_t*)&u128)[15 - index]; }
++
++        auto element(u32 index) -> uint16_t& { return ((uint16_t*)&u128)[7 - index]; }
++        auto element(u32 index) const -> uint16_t { return ((uint16_t*)&u128)[7 - index]; }
++
++        auto u8(u32 index) -> uint8_t& { return ((uint8_t*)&u128)[15 - index]; }
++        auto u8(u32 index) const -> uint8_t { return ((uint8_t*)&u128)[15 - index]; }
++
++        auto s16(u32 index) -> int16_t& { return ((int16_t*)&u128)[7 - index]; }
++        auto s16(u32 index) const -> int16_t { return ((int16_t*)&u128)[7 - index]; }
++
++        auto u16(u32 index) -> uint16_t& { return ((uint16_t*)&u128)[7 - index]; }
++        auto u16(u32 index) const -> uint16_t { return ((uint16_t*)&u128)[7 - index]; }
++
++        //VCx registers
++        auto get(u32 index) const -> bool { return u16(index) != 0; }
++        auto set(u32 index, bool value) -> bool { return u16(index) = 0 - value, value; }
++
++        //vu-registers.cpp
++        inline auto operator()(u32 index) const -> r128;
++    };
++    using cr128 = const r128;
++
++    struct VU {
++        r128 r[32];
++        r128 acch, accm, accl;
++        r128 vcoh, vcol;  //16-bit little endian
++        r128 vcch, vccl;  //16-bit little endian
++        r128 vce;         // 8-bit little endian
++        s16 divin;
++        s16 divout;
++        bool divdp;
++    } vpu;
++
++    static constexpr r128 zero{{0}};
++    static constexpr r128 invert{{(uint64_t)-1, (uint64_t)-1}};
++
++    inline auto accumulatorGet(u32 index) const -> u64;
++    inline auto accumulatorSet(u32 index, u64 value) -> void;
++    inline auto accumulatorSaturate(u32 index, bool slice, u16 negative, u16 positive) const -> u16;
++
++    inline auto CFC2(r32& rt, u8 rd) -> void;
++    inline auto CTC2(cr32& rt, u8 rd) -> void;
++    template<u8 e> inline auto LBV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LDV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LFV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LHV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LLV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LPV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LQV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LRV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LSV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LTV(u8 vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LUV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto LWV(r128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto MFC2(r32& rt, cr128& vs) -> void;
++    template<u8 e> inline auto MTC2(cr32& rt, r128& vs) -> void;
++    template<u8 e> inline auto SBV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SDV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SFV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SHV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SLV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SPV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SQV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SRV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SSV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto STV(u8 vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SUV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto SWV(cr128& vt, cr32& rs, s8 imm) -> void;
++    template<u8 e> inline auto VABS(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VADD(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VADDC(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VAND(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VCH(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VCL(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VCR(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VEQ(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VGE(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VLT(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<bool U, u8 e>
++    inline auto VMACF(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMACF(r128& vd, cr128& vs, cr128& vt) -> void { VMACF<0, e>(vd, vs, vt); }
++    template<u8 e> inline auto VMACU(r128& vd, cr128& vs, cr128& vt) -> void { VMACF<1, e>(vd, vs, vt); }
++    inline auto VMACQ(r128& vd) -> void;
++    template<u8 e> inline auto VMADH(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMADL(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMADM(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMADN(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMOV(r128& vd, u8 de, cr128& vt) -> void;
++    template<u8 e> inline auto VMRG(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMUDH(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMUDL(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMUDM(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMUDN(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<bool U, u8 e>
++    inline auto VMULF(r128& rd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VMULF(r128& rd, cr128& vs, cr128& vt) -> void { VMULF<0, e>(rd, vs, vt); }
++    template<u8 e> inline auto VMULU(r128& rd, cr128& vs, cr128& vt) -> void { VMULF<1, e>(rd, vs, vt); }
++    template<u8 e> inline auto VMULQ(r128& rd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VNAND(r128& rd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VNE(r128& vd, cr128& vs, cr128& vt) -> void;
++    inline auto VNOP() -> void;
++    template<u8 e> inline auto VNOR(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VNXOR(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VOR(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<bool L, u8 e>
++    inline auto VRCP(r128& vd, u8 de, cr128& vt) -> void;
++    template<u8 e> inline auto VRCP(r128& vd, u8 de, cr128& vt) -> void { VRCP<0, e>(vd, de, vt); }
++    template<u8 e> inline auto VRCPL(r128& vd, u8 de, cr128& vt) -> void { VRCP<1, e>(vd, de, vt); }
++    template<u8 e> inline auto VRCPH(r128& vd, u8 de, cr128& vt) -> void;
++    template<bool D, u8 e>
++    inline auto VRND(r128& vd, u8 vs, cr128& vt) -> void;
++    template<u8 e> inline auto VRNDN(r128& vd, u8 vs, cr128& vt) -> void { VRND<0, e>(vd, vs, vt); }
++    template<u8 e> inline auto VRNDP(r128& vd, u8 vs, cr128& vt) -> void { VRND<1, e>(vd, vs, vt); }
++    template<bool L, u8 e>
++    inline auto VRSQ(r128& vd, u8 de, cr128& vt) -> void;
++    template<u8 e> inline auto VRSQ(r128& vd, u8 de, cr128& vt) -> void { VRSQ<0, e>(vd, de, vt); }
++    template<u8 e> inline auto VRSQL(r128& vd, u8 de, cr128& vt) -> void { VRSQ<1, e>(vd, de, vt); }
++    template<u8 e> inline auto VRSQH(r128& vd, u8 de, cr128& vt) -> void;
++    template<u8 e> inline auto VSAR(r128& vd, cr128& vs) -> void;
++    template<u8 e> inline auto VSUB(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VSUBC(r128& vd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VXOR(r128& rd, cr128& vs, cr128& vt) -> void;
++    template<u8 e> inline auto VZERO(r128& rd, cr128& vs, cr128& vt) -> void;
++};
++
++
++#define ACCH vpu.acch
++#define ACCM vpu.accm
++#define ACCL vpu.accl
++#define VCOH vpu.vcoh
++#define VCOL vpu.vcol
++#define VCCH vpu.vcch
++#define VCCL vpu.vccl
++#define VCE  vpu.vce
++
++#define DIVIN  vpu.divin
++#define DIVOUT vpu.divout
++#define DIVDP  vpu.divdp
++
++auto RSP::r128::operator()(u32 index) const -> r128 {
++    if constexpr (Accuracy::RSP::SISD) {
++        r128 v{ *this };
++        switch (index) {
++        case  0: break;
++        case  1: break;
++        case  2: v.u16(1) = v.u16(0); v.u16(3) = v.u16(2); v.u16(5) = v.u16(4); v.u16(7) = v.u16(6); break;
++        case  3: v.u16(0) = v.u16(1); v.u16(2) = v.u16(3); v.u16(4) = v.u16(5); v.u16(6) = v.u16(7); break;
++        case  4: v.u16(1) = v.u16(2) = v.u16(3) = v.u16(0); v.u16(5) = v.u16(6) = v.u16(7) = v.u16(4); break;
++        case  5: v.u16(0) = v.u16(2) = v.u16(3) = v.u16(1); v.u16(4) = v.u16(6) = v.u16(7) = v.u16(5); break;
++        case  6: v.u16(0) = v.u16(1) = v.u16(3) = v.u16(2); v.u16(4) = v.u16(5) = v.u16(7) = v.u16(6); break;
++        case  7: v.u16(0) = v.u16(1) = v.u16(2) = v.u16(3); v.u16(4) = v.u16(5) = v.u16(6) = v.u16(7); break;
++        case  8: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(0); break;
++        case  9: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(1); break;
++        case 10: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(2); break;
++        case 11: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(3); break;
++        case 12: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(4); break;
++        case 13: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(5); break;
++        case 14: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(6); break;
++        case 15: for (u32 n = 0; n < 8; n++) v.u16(n) = v.u16(7); break;
++        }
++        return v;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        static const __m128i shuffle[16] = {
++            //vector
++            _mm_set_epi8(15,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0),  //01234567
++            _mm_set_epi8(15,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0),  //01234567
++            //scalar quarter
++            _mm_set_epi8(15,14,15,14,11,10,11,10, 7, 6, 7, 6, 3, 2, 3, 2),  //00224466
++            _mm_set_epi8(13,12,13,12, 9, 8, 9, 8, 5, 4, 5, 4, 1, 0, 1, 0),  //11335577
++            //scalar half
++            _mm_set_epi8(15,14,15,14,15,14,15,14, 7, 6, 7, 6, 7, 6, 7, 6),  //00004444
++            _mm_set_epi8(13,12,13,12,13,12,13,12, 5, 4, 5, 4, 5, 4, 5, 4),  //11115555
++            _mm_set_epi8(11,10,11,10,11,10,11,10, 3, 2, 3, 2, 3, 2, 3, 2),  //22226666
++            _mm_set_epi8(9, 8, 9, 8, 9, 8, 9, 8, 1, 0, 1, 0, 1, 0, 1, 0),  //33337777
++            //scalar whole
++            _mm_set_epi8(15,14,15,14,15,14,15,14,15,14,15,14,15,14,15,14),  //00000000
++            _mm_set_epi8(13,12,13,12,13,12,13,12,13,12,13,12,13,12,13,12),  //11111111
++            _mm_set_epi8(11,10,11,10,11,10,11,10,11,10,11,10,11,10,11,10),  //22222222
++            _mm_set_epi8(9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8),  //33333333
++            _mm_set_epi8(7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6),  //44444444
++            _mm_set_epi8(5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4),  //55555555
++            _mm_set_epi8(3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2),  //66666666
++            _mm_set_epi8(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),  //77777777
++        };
++        //todo: benchmark to see if testing for cases 0&1 to return value directly is faster
++        r128 ret;
++        ret.v128 = _mm_shuffle_epi8(v128, shuffle[index]);
++        return ret;
++#endif
++    }
++}
++
++auto RSP::accumulatorGet(u32 index) const -> u64 {
++    return (u64)ACCH.u16(index) << 32 | (u64)ACCM.u16(index) << 16 | (u64)ACCL.u16(index) << 0;
++}
++
++auto RSP::accumulatorSet(u32 index, u64 value) -> void {
++    ACCH.u16(index) = value >> 32;
++    ACCM.u16(index) = value >> 16;
++    ACCL.u16(index) = value >> 0;
++}
++
++auto RSP::accumulatorSaturate(u32 index, bool slice, u16 negative, u16 positive) const -> u16 {
++    if (ACCH.s16(index) < 0) {
++        if (ACCH.u16(index) != 0xffff) return negative;
++        if (ACCM.s16(index) >= 0) return negative;
++    } else {
++        if (ACCH.u16(index) != 0x0000) return positive;
++        if (ACCM.s16(index) < 0) return positive;
++    }
++    return !slice ? ACCL.u16(index) : ACCM.u16(index);
++}
++
++auto RSP::CFC2(r32& rt, u8 rd) -> void {
++    r128 hi, lo;
++    switch (rd & 3) {
++    case 0x00: hi = VCOH; lo = VCOL; break;
++    case 0x01: hi = VCCH; lo = VCCL; break;
++    case 0x02: hi = zero; lo = VCE;  break;
++    case 0x03: hi = zero; lo = VCE;  break;  //unverified
++    }
++
++    if constexpr (Accuracy::RSP::SISD) {
++        rt = 0;
++        for (u32 n = 0; n < 8; n++) {
++            rt |= lo.get(n) << (0 + n);
++            rt |= hi.get(n) << (8 + n);
++        }
++        rt = s16(rt);
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        static const v128 reverse = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++        rt = s16(_mm_movemask_epi8(_mm_shuffle_epi8(_mm_packs_epi16(hi, lo), reverse)));
++#endif
++    }
++}
++
++auto RSP::CTC2(cr32& rt, u8 rd) -> void {
++    r128* hi; r128* lo;
++    r128 null;
++    switch (rd & 3) {
++    case 0x00: hi = &VCOH; lo = &VCOL; break;
++    case 0x01: hi = &VCCH; lo = &VCCL; break;
++    case 0x02: hi = &null; lo = &VCE;  break;
++    case 0x03: hi = &null; lo = &VCE;  break;  //unverified
++    }
++
++    if constexpr (Accuracy::RSP::SISD) {
++        for (u32 n = 0; n < 8; n++) {
++            lo->set(n, rt & 1 << (0 + n));
++            hi->set(n, rt & 1 << (8 + n));
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        static const v128 mask = _mm_set_epi16(0x0101, 0x0202, 0x0404, 0x0808, 0x1010, 0x2020, 0x4040, 0x8080);
++        lo->v128 = _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(r128{ ~rt >> 0 }, zero), mask), zero);
++        hi->v128 = _mm_cmpeq_epi8(_mm_and_si128(_mm_shuffle_epi8(r128{ ~rt >> 8 }, zero), mask), zero);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::LBV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm;
++    vt.byte(e) = RSP_MEM_B(0, address);
++}
++
++template<u8 e>
++auto RSP::LDV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto start = e;
++    auto end = std::min(start + 8, 16);
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address++);
++    }
++}
++
++template<u8 e>
++auto RSP::LFV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto index = (address & 7) - e;
++    address &= ~7;
++    auto start = e;
++    auto end = std::min(start + 8, 16);
++    r128 tmp;
++    for (u32 offset = 0; offset < 4; offset++) {
++        tmp.element(offset + 0) = RSP_MEM_B(0, address + (index + offset * 4 + 0 & 15)) << 7;
++        tmp.element(offset + 4) = RSP_MEM_B(0, address + (index + offset * 4 + 8 & 15)) << 7;
++    }
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset) = tmp.byte(offset);
++    }
++}
++
++template<u8 e>
++auto RSP::LHV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto index = (address & 7) - e;
++    address &= ~7;
++    for (u32 offset = 0; offset < 8; offset++) {
++        vt.element(offset) = RSP_MEM_B(0, address + (index + offset * 2 & 15)) << 7;
++    }
++}
++
++template<u8 e>
++auto RSP::LLV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 4;
++    auto start = e;
++    auto end = std::min(start + 4, 16);
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address++);
++    }
++}
++
++template<u8 e>
++auto RSP::LPV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto index = (address & 7) - e;
++    address &= ~7;
++    for (u32 offset = 0; offset < 8; offset++) {
++        vt.element(offset) = RSP_MEM_B(0, address + (index + offset & 15)) << 8;
++    }
++}
++
++template<u8 e>
++auto RSP::LQV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = e;
++    auto end = std::min((u32)(16 + e - (address & 15)), (u32)16);
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address++);
++    }
++}
++
++template<u8 e>
++auto RSP::LRV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto index = e;
++    auto start = 16 - ((address & 15) - index);
++    address &= ~15;
++    for (u32 offset = start; offset < 16; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address++);
++    }
++}
++
++template<u8 e>
++auto RSP::LSV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 2;
++    auto start = e;
++    auto end = std::min(start + 2, 16);
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address++);
++    }
++}
++
++template<u8 e>
++auto RSP::LTV(u8 vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto begin = address & ~7;
++    address = begin + ((e + (address & 8)) & 15);
++    auto vtbase = vt & ~7;
++    auto vtoff = e >> 1;
++    for (u32 i = 0; i < 8; i++) {
++        vpu.r[vtbase + vtoff].byte(i * 2 + 0) = RSP_MEM_B(0, address++);
++        if (address == begin + 16) address = begin;
++        vpu.r[vtbase + vtoff].byte(i * 2 + 1) = RSP_MEM_B(0, address++);
++        if (address == begin + 16) address = begin;
++        vtoff = vtoff + 1 & 7;
++    }
++}
++
++template<u8 e>
++auto RSP::LUV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto index = (address & 7) - e;
++    address &= ~7;
++    for (u32 offset = 0; offset < 8; offset++) {
++        vt.element(offset) = RSP_MEM_B(0, address + (index + offset & 15)) << 7;
++    }
++}
++
++template<u8 e>
++auto RSP::LWV(r128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = 16 - e;
++    auto end = e + 16;
++    for (u32 offset = start; offset < end; offset++) {
++        vt.byte(offset & 15) = RSP_MEM_B(0, address);
++        address += 4;
++    }
++}
++
++template<u8 e>
++auto RSP::MFC2(r32& rt, cr128& vs) -> void {
++    auto hi = vs.byte(e + 0 & 15);
++    auto lo = vs.byte(e + 1 & 15);
++    rt = s16(hi << 8 | lo << 0);
++}
++
++template<u8 e>
++auto RSP::MTC2(cr32& rt, r128& vs) -> void {
++    vs.byte(e + 0) = rt >> 8;
++    if (e != 15) vs.byte(e + 1) = rt >> 0;
++}
++
++template<u8 e>
++auto RSP::SBV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm;
++    RSP_MEM_B(0, address) = vt.byte(e);
++}
++
++template<u8 e>
++auto RSP::SDV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto start = e;
++    auto end = start + 8;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address++) = vt.byte(offset & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::SFV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto base = address & 7;
++    address &= ~7;
++    switch (e) {
++    case 0: case 15:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(0) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(1) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(2) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(3) >> 7;
++        break;
++    case 1:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(6) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(7) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(4) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(5) >> 7;
++        break;
++    case 4:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(1) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(2) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(3) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(0) >> 7;
++        break;
++    case 5:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(7) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(4) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(5) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(6) >> 7;
++        break;
++    case 8:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(4) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(5) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(6) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(7) >> 7;
++        break;
++    case 11:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(3) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(0) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(1) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(2) >> 7;
++        break;
++    case 12:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = vt.element(5) >> 7;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = vt.element(6) >> 7;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = vt.element(7) >> 7;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = vt.element(4) >> 7;
++        break;
++    default:
++        RSP_MEM_B(0, address + (base + 0 & 15)) = 0;
++        RSP_MEM_B(0, address + (base + 4 & 15)) = 0;
++        RSP_MEM_B(0, address + (base + 8 & 15)) = 0;
++        RSP_MEM_B(0, address + (base + 12 & 15)) = 0;
++        break;
++    }
++}
++
++template<u8 e>
++auto RSP::SHV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto index = address & 7;
++    address &= ~7;
++    for (u32 offset = 0; offset < 8; offset++) {
++        auto byte = e + offset * 2;
++        auto value = vt.byte(byte + 0 & 15) << 1 | vt.byte(byte + 1 & 15) >> 7;
++        RSP_MEM_B(0, address + (index + offset * 2 & 15)) = value;
++    }
++}
++
++template<u8 e>
++auto RSP::SLV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 4;
++    auto start = e;
++    auto end = start + 4;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address++) = vt.byte(offset & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::SPV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto start = e;
++    auto end = start + 8;
++    for (u32 offset = start; offset < end; offset++) {
++        if ((offset & 15) < 8) {
++            RSP_MEM_B(0, address++) = vt.byte((offset & 7) << 1);
++        } else {
++            RSP_MEM_B(0, address++) = vt.element(offset & 7) >> 7;
++        }
++    }
++}
++
++template<u8 e>
++auto RSP::SQV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = e;
++    auto end = start + (16 - (address & 15));
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address++) = vt.byte(offset & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::SRV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = e;
++    auto end = start + (address & 15);
++    auto base = 16 - (address & 15);
++    address &= ~15;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address++) = vt.byte(offset + base & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::SSV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 2;
++    auto start = e;
++    auto end = start + 2;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address++) = vt.byte(offset & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::STV(u8 vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = vt & ~7;
++    auto end = start + 8;
++    auto element = 16 - (e & ~1);
++    auto base = (address & 7) - (e & ~1);
++    address &= ~7;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address + (base++ & 15)) = vpu.r[offset].byte(element++ & 15);
++        RSP_MEM_B(0, address + (base++ & 15)) = vpu.r[offset].byte(element++ & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::SUV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 8;
++    auto start = e;
++    auto end = start + 8;
++    for (u32 offset = start; offset < end; offset++) {
++        if ((offset & 15) < 8) {
++            RSP_MEM_B(0, address++) = vt.element(offset & 7) >> 7;
++        } else {
++            RSP_MEM_B(0, address++) = vt.byte((offset & 7) << 1);
++        }
++    }
++}
++
++template<u8 e>
++auto RSP::SWV(cr128& vt, cr32& rs, s8 imm) -> void {
++    auto address = rs + imm * 16;
++    auto start = e;
++    auto end = start + 16;
++    auto base = address & 7;
++    address &= ~7;
++    for (u32 offset = start; offset < end; offset++) {
++        RSP_MEM_B(0, address + (base++ & 15)) = vt.byte(offset & 15);
++    }
++}
++
++template<u8 e>
++auto RSP::VABS(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        r128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            if (vs.s16(n) < 0) {
++                if (vte.s16(n) == -32768) {
++                    ACCL.s16(n) = -32768;
++                    vd.s16(n) = 32767;
++                } else {
++                    ACCL.s16(n) = -vte.s16(n);
++                    vd.s16(n) = -vte.s16(n);
++                }
++            } else if (vs.s16(n) > 0) {
++                ACCL.s16(n) = +vte.s16(n);
++                vd.s16(n) = +vte.s16(n);
++            } else {
++                ACCL.s16(n) = 0;
++                vd.s16(n) = 0;
++            }
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vs0, slt;
++        vs0 = _mm_cmpeq_epi16(vs, zero);
++        slt = _mm_srai_epi16(vs, 15);
++        vd = _mm_andnot_si128(vs0, vt(e));
++        vd = _mm_xor_si128(vd, slt);
++        ACCL = _mm_sub_epi16(vd, slt);
++        vd = _mm_subs_epi16(vd, slt);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VADD(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            s32 result = vs.s16(n) + vte.s16(n) + VCOL.get(n);
++            ACCL.s16(n) = result;
++            vd.s16(n) = sclamp<16>(result);
++        }
++        VCOL = zero;
++        VCOH = zero;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sum, min, max;
++        sum = _mm_add_epi16(vs, vte);
++        ACCL = _mm_sub_epi16(sum, VCOL);
++        min = _mm_min_epi16(vs, vte);
++        max = _mm_max_epi16(vs, vte);
++        min = _mm_subs_epi16(min, VCOL);
++        vd = _mm_adds_epi16(min, max);
++        VCOL = zero;
++        VCOH = zero;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VADDC(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            u32 result = vs.u16(n) + vte.u16(n);
++            ACCL.u16(n) = result;
++            VCOL.set(n, result >> 16);
++        }
++        VCOH = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sum;
++        sum = _mm_adds_epu16(vs, vte);
++        ACCL = _mm_add_epi16(vs, vte);
++        VCOL = _mm_cmpeq_epi16(sum, ACCL);
++        VCOL = _mm_cmpeq_epi16(VCOL, zero);
++        VCOH = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VAND(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        r128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = vs.u16(n) & vte.u16(n);
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_and_si128(vs, vt(e));
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VCH(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            if ((vs.s16(n) ^ vte.s16(n)) < 0) {
++                s16 result = vs.s16(n) + vte.s16(n);
++                ACCL.s16(n) = (result <= 0 ? -vte.s16(n) : vs.s16(n));
++                VCCL.set(n, result <= 0);
++                VCCH.set(n, vte.s16(n) < 0);
++                VCOL.set(n, 1);
++                VCOH.set(n, result != 0 && vs.u16(n) != (vte.u16(n) ^ 0xffff));
++                VCE.set(n, result == -1);
++            } else {
++                s16 result = vs.s16(n) - vte.s16(n);
++                ACCL.s16(n) = (result >= 0 ? vte.s16(n) : vs.s16(n));
++                VCCL.set(n, vte.s16(n) < 0);
++                VCCH.set(n, result >= 0);
++                VCOL.set(n, 0);
++                VCOH.set(n, result != 0 && vs.u16(n) != (vte.u16(n) ^ 0xffff));
++                VCE.set(n, 0);
++            }
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), nvt, diff, diff0, vtn, dlez, dgez, mask;
++        VCOL = _mm_xor_si128(vs, vte);
++        VCOL = _mm_cmplt_epi16(VCOL, zero);
++        nvt = _mm_xor_si128(vte, VCOL);
++        nvt = _mm_sub_epi16(nvt, VCOL);
++        diff = _mm_sub_epi16(vs, nvt);
++        diff0 = _mm_cmpeq_epi16(diff, zero);
++        vtn = _mm_cmplt_epi16(vte, zero);
++        dlez = _mm_cmpgt_epi16(diff, zero);
++        dgez = _mm_or_si128(dlez, diff0);
++        dlez = _mm_cmpeq_epi16(zero, dlez);
++        VCCH = _mm_blendv_epi8(dgez, vtn, VCOL);
++        VCCL = _mm_blendv_epi8(vtn, dlez, VCOL);
++        VCE = _mm_cmpeq_epi16(diff, VCOL);
++        VCE = _mm_and_si128(VCE, VCOL);
++        VCOH = _mm_or_si128(diff0, VCE);
++        VCOH = _mm_cmpeq_epi16(VCOH, zero);
++        mask = _mm_blendv_epi8(VCCH, VCCL, VCOL);
++        ACCL = _mm_blendv_epi8(vs, nvt, mask);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VCL(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            if (VCOL.get(n)) {
++                if (VCOH.get(n)) {
++                    ACCL.u16(n) = VCCL.get(n) ? -vte.u16(n) : vs.u16(n);
++                } else {
++                    u16 sum = vs.u16(n) + vte.u16(n);
++                    bool carry = (vs.u16(n) + vte.u16(n)) != sum;
++                    if (VCE.get(n)) {
++                        ACCL.u16(n) = VCCL.set(n, (!sum || !carry)) ? -vte.u16(n) : vs.u16(n);
++                    } else {
++                        ACCL.u16(n) = VCCL.set(n, (!sum && !carry)) ? -vte.u16(n) : vs.u16(n);
++                    }
++                }
++            } else {
++                if (VCOH.get(n)) {
++                    ACCL.u16(n) = VCCH.get(n) ? vte.u16(n) : vs.u16(n);
++                } else {
++                    ACCL.u16(n) = VCCH.set(n, (s32)vs.u16(n) - (s32)vte.u16(n) >= 0) ? vte.u16(n) : vs.u16(n);
++                }
++            }
++        }
++        VCOL = zero;
++        VCOH = zero;
++        VCE = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), nvt, diff, ncarry, nvce, diff0, lec1, lec2, leeq, geeq, le, ge, mask;
++        nvt = _mm_xor_si128(vte, VCOL);
++        nvt = _mm_sub_epi16(nvt, VCOL);
++        diff = _mm_sub_epi16(vs, nvt);
++        ncarry = _mm_adds_epu16(vs, vte);
++        ncarry = _mm_cmpeq_epi16(diff, ncarry);
++        nvce = _mm_cmpeq_epi16(VCE, zero);
++        diff0 = _mm_cmpeq_epi16(diff, zero);
++        lec1 = _mm_and_si128(diff0, ncarry);
++        lec1 = _mm_and_si128(nvce, lec1);
++        lec2 = _mm_or_si128(diff0, ncarry);
++        lec2 = _mm_and_si128(VCE, lec2);
++        leeq = _mm_or_si128(lec1, lec2);
++        geeq = _mm_subs_epu16(vte, vs);
++        geeq = _mm_cmpeq_epi16(geeq, zero);
++        le = _mm_andnot_si128(VCOH, VCOL);
++        le = _mm_blendv_epi8(VCCL, leeq, le);
++        ge = _mm_or_si128(VCOL, VCOH);
++        ge = _mm_blendv_epi8(geeq, VCCH, ge);
++        mask = _mm_blendv_epi8(ge, le, VCOL);
++        ACCL = _mm_blendv_epi8(vs, nvt, mask);
++        VCCH = ge;
++        VCCL = le;
++        VCOH = zero;
++        VCOL = zero;
++        VCE = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VCR(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            if ((vs.s16(n) ^ vte.s16(n)) < 0) {
++                VCCH.set(n, vte.s16(n) < 0);
++                ACCL.u16(n) = VCCL.set(n, vs.s16(n) + vte.s16(n) + 1 <= 0) ? ~vte.u16(n) : vs.u16(n);
++            } else {
++                VCCL.set(n, vte.s16(n) < 0);
++                ACCL.u16(n) = VCCH.set(n, vs.s16(n) - vte.s16(n) >= 0) ? vte.u16(n) : vs.u16(n);
++            }
++        }
++        VCOL = zero;
++        VCOH = zero;
++        VCE = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sign, dlez, dgez, nvt, mask;
++        sign = _mm_xor_si128(vs, vte);
++        sign = _mm_srai_epi16(sign, 15);
++        dlez = _mm_and_si128(vs, sign);
++        dlez = _mm_add_epi16(dlez, vte);
++        VCCL = _mm_srai_epi16(dlez, 15);
++        dgez = _mm_or_si128(vs, sign);
++        dgez = _mm_min_epi16(dgez, vte);
++        VCCH = _mm_cmpeq_epi16(dgez, vte);
++        nvt = _mm_xor_si128(vte, sign);
++        mask = _mm_blendv_epi8(VCCH, VCCL, sign);
++        ACCL = _mm_blendv_epi8(vs, nvt, mask);
++        vd = ACCL;
++        VCOL = zero;
++        VCOH = zero;
++        VCE = zero;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VEQ(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = VCCL.set(n, !VCOH.get(n) && vs.u16(n) == vte.u16(n)) ? vs.u16(n) : vte.u16(n);
++        }
++        VCCH = zero;  //unverified
++        VCOL = zero;
++        VCOH = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), eq;
++        eq = _mm_cmpeq_epi16(vs, vte);
++        VCCL = _mm_andnot_si128(VCOH, eq);
++        ACCL = _mm_blendv_epi8(vte, vs, VCCL);
++        VCCH = zero;  //unverified
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VGE(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = VCCL.set(n, vs.s16(n) > vte.s16(n) || (vs.s16(n) == vte.s16(n) && (!VCOL.get(n) || !VCOH.get(n)))) ? vs.u16(n) : vte.u16(n);
++        }
++        VCCH = zero;  //unverified
++        VCOL = zero;
++        VCOH = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), eq, gt, es;
++        eq = _mm_cmpeq_epi16(vs, vte);
++        gt = _mm_cmpgt_epi16(vs, vte);
++        es = _mm_and_si128(VCOH, VCOL);
++        eq = _mm_andnot_si128(es, eq);
++        VCCL = _mm_or_si128(gt, eq);
++        ACCL = _mm_blendv_epi8(vte, vs, VCCL);
++        VCCH = zero;
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VLT(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = VCCL.set(n, vs.s16(n) < vte.s16(n) || (vs.s16(n) == vte.s16(n) && VCOL.get(n) && VCOH.get(n))) ? vs.u16(n) : vte.u16(n);
++        }
++        VCCH = zero;
++        VCOL = zero;
++        VCOH = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), eq, lt;
++        eq = _mm_cmpeq_epi16(vs, vte);
++        lt = _mm_cmplt_epi16(vs, vte);
++        eq = _mm_and_si128(VCOH, eq);
++        eq = _mm_and_si128(VCOL, eq);
++        VCCL = _mm_or_si128(lt, eq);
++        ACCL = _mm_blendv_epi8(vte, vs, VCCL);
++        VCCH = zero;
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<bool U, u8 e>
++auto RSP::VMACF(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, accumulatorGet(n) + (s64)vs.s16(n) * (s64)vte.s16(n) * 2);
++            if constexpr (U == 0) {
++                vd.u16(n) = accumulatorSaturate(n, 1, 0x8000, 0x7fff);
++            }
++            if constexpr (U == 1) {
++                vd.u16(n) = ACCH.s16(n) < 0 ? 0x0000 : ACCH.s16(n) || ACCM.s16(n) < 0 ? 0xffff : ACCM.u16(n);
++            }
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, md, hi, carry, omask;
++        lo = _mm_mullo_epi16(vs, vte);
++        hi = _mm_mulhi_epi16(vs, vte);
++        md = _mm_slli_epi16(hi, 1);
++        carry = _mm_srli_epi16(lo, 15);
++        hi = _mm_srai_epi16(hi, 15);
++        md = _mm_or_si128(md, carry);
++        lo = _mm_slli_epi16(lo, 1);
++        omask = _mm_adds_epu16(ACCL, lo);
++        ACCL = _mm_add_epi16(ACCL, lo);
++        omask = _mm_cmpeq_epi16(ACCL, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        md = _mm_sub_epi16(md, omask);
++        carry = _mm_cmpeq_epi16(md, zero);
++        carry = _mm_and_si128(carry, omask);
++        hi = _mm_sub_epi16(hi, carry);
++        omask = _mm_adds_epu16(ACCM, md);
++        ACCM = _mm_add_epi16(ACCM, md);
++        omask = _mm_cmpeq_epi16(ACCM, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        ACCH = _mm_add_epi16(ACCH, hi);
++        ACCH = _mm_sub_epi16(ACCH, omask);
++        if constexpr (!U) {
++            lo = _mm_unpacklo_epi16(ACCM, ACCH);
++            hi = _mm_unpackhi_epi16(ACCM, ACCH);
++            vd = _mm_packs_epi32(lo, hi);
++        } else {
++            r128 mmask, hmask;
++            mmask = _mm_srai_epi16(ACCM, 15);
++            hmask = _mm_srai_epi16(ACCH, 15);
++            md = _mm_or_si128(mmask, ACCM);
++            omask = _mm_cmpgt_epi16(ACCH, zero);
++            md = _mm_andnot_si128(hmask, md);
++            vd = _mm_or_si128(omask, md);
++        }
++#endif
++    }
++}
++
++auto RSP::VMACQ(r128& vd) -> void {
++    for (u32 n = 0; n < 8; n++) {
++        s32 product = ACCH.element(n) << 16 | ACCM.element(n) << 0;
++        if (product < 0 && !(product & 1 << 5)) product += 32;
++        else if (product >= 32 && !(product & 1 << 5)) product -= 32;
++        ACCH.element(n) = product >> 16;
++        ACCM.element(n) = product >> 0;
++        vd.element(n) = sclamp<16>(product >> 1) & ~15;
++    }
++}
++
++template<u8 e>
++auto RSP::VMADH(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            s32 result = (accumulatorGet(n) >> 16) + vs.s16(n) * vte.s16(n);
++            ACCH.u16(n) = result >> 16;
++            ACCM.u16(n) = result >> 0;
++            vd.u16(n) = accumulatorSaturate(n, 1, 0x8000, 0x7fff);
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, hi, omask;
++        lo = _mm_mullo_epi16(vs, vte);
++        hi = _mm_mulhi_epi16(vs, vte);
++        omask = _mm_adds_epu16(ACCM, lo);
++        ACCM = _mm_add_epi16(ACCM, lo);
++        omask = _mm_cmpeq_epi16(ACCM, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_sub_epi16(hi, omask);
++        ACCH = _mm_add_epi16(ACCH, hi);
++        lo = _mm_unpacklo_epi16(ACCM, ACCH);
++        hi = _mm_unpackhi_epi16(ACCM, ACCH);
++        vd = _mm_packs_epi32(lo, hi);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMADL(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, accumulatorGet(n) + (u32(vs.u16(n) * vte.u16(n)) >> 16));
++            vd.u16(n) = accumulatorSaturate(n, 0, 0x0000, 0xffff);
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), hi, omask, nhi, nmd, shi, smd, cmask, cval;
++        hi = _mm_mulhi_epu16(vs, vte);
++        omask = _mm_adds_epu16(ACCL, hi);
++        ACCL = _mm_add_epi16(ACCL, hi);
++        omask = _mm_cmpeq_epi16(ACCL, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_sub_epi16(zero, omask);
++        omask = _mm_adds_epu16(ACCM, hi);
++        ACCM = _mm_add_epi16(ACCM, hi);
++        omask = _mm_cmpeq_epi16(ACCM, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        ACCH = _mm_sub_epi16(ACCH, omask);
++        nhi = _mm_srai_epi16(ACCH, 15);
++        nmd = _mm_srai_epi16(ACCM, 15);
++        shi = _mm_cmpeq_epi16(nhi, ACCH);
++        smd = _mm_cmpeq_epi16(nhi, nmd);
++        cmask = _mm_and_si128(smd, shi);
++        cval = _mm_cmpeq_epi16(nhi, zero);
++        vd = _mm_blendv_epi8(cval, ACCL, cmask);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMADM(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, accumulatorGet(n) + vs.s16(n) * vte.u16(n));
++            vd.u16(n) = accumulatorSaturate(n, 1, 0x8000, 0x7fff);
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, hi, sign, vta, omask;
++        lo = _mm_mullo_epi16(vs, vte);
++        hi = _mm_mulhi_epu16(vs, vte);
++        sign = _mm_srai_epi16(vs, 15);
++        vta = _mm_and_si128(vte, sign);
++        hi = _mm_sub_epi16(hi, vta);
++        omask = _mm_adds_epu16(ACCL, lo);
++        ACCL = _mm_add_epi16(ACCL, lo);
++        omask = _mm_cmpeq_epi16(ACCL, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_sub_epi16(hi, omask);
++        omask = _mm_adds_epu16(ACCM, hi);
++        ACCM = _mm_add_epi16(ACCM, hi);
++        omask = _mm_cmpeq_epi16(ACCM, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_srai_epi16(hi, 15);
++        ACCH = _mm_add_epi16(ACCH, hi);
++        ACCH = _mm_sub_epi16(ACCH, omask);
++        lo = _mm_unpacklo_epi16(ACCM, ACCH);
++        hi = _mm_unpackhi_epi16(ACCM, ACCH);
++        vd = _mm_packs_epi32(lo, hi);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMADN(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, accumulatorGet(n) + s64(vs.u16(n) * vte.s16(n)));
++            vd.u16(n) = accumulatorSaturate(n, 0, 0x0000, 0xffff);
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, hi, sign, vsa, omask, nhi, nmd, shi, smd, cmask, cval;
++        lo = _mm_mullo_epi16(vs, vte);
++        hi = _mm_mulhi_epu16(vs, vte);
++        sign = _mm_srai_epi16(vte, 15);
++        vsa = _mm_and_si128(vs, sign);
++        hi = _mm_sub_epi16(hi, vsa);
++        omask = _mm_adds_epu16(ACCL, lo);
++        ACCL = _mm_add_epi16(ACCL, lo);
++        omask = _mm_cmpeq_epi16(ACCL, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_sub_epi16(hi, omask);
++        omask = _mm_adds_epu16(ACCM, hi);
++        ACCM = _mm_add_epi16(ACCM, hi);
++        omask = _mm_cmpeq_epi16(ACCM, omask);
++        omask = _mm_cmpeq_epi16(omask, zero);
++        hi = _mm_srai_epi16(hi, 15);
++        ACCH = _mm_add_epi16(ACCH, hi);
++        ACCH = _mm_sub_epi16(ACCH, omask);
++        nhi = _mm_srai_epi16(ACCH, 15);
++        nmd = _mm_srai_epi16(ACCM, 15);
++        shi = _mm_cmpeq_epi16(nhi, ACCH);
++        smd = _mm_cmpeq_epi16(nhi, nmd);
++        cmask = _mm_and_si128(smd, shi);
++        cval = _mm_cmpeq_epi16(nhi, zero);
++        vd = _mm_blendv_epi8(cval, ACCL, cmask);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMOV(r128& vd, u8 de, cr128& vt) -> void {
++    cr128 vte = vt(e);
++    vd.u16(de) = vte.u16(de);
++    ACCL = vte;
++}
++
++template<u8 e>
++auto RSP::VMRG(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = VCCL.get(n) ? vs.u16(n) : vte.u16(n);
++        }
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_blendv_epi8(vt(e), vs, VCCL);
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMUDH(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, s64(vs.s16(n) * vte.s16(n)) << 16);
++            vd.u16(n) = accumulatorSaturate(n, 1, 0x8000, 0x7fff);
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, hi;
++        ACCL = zero;
++        ACCM = _mm_mullo_epi16(vs, vte);
++        ACCH = _mm_mulhi_epi16(vs, vte);
++        lo = _mm_unpacklo_epi16(ACCM, ACCH);
++        hi = _mm_unpackhi_epi16(ACCM, ACCH);
++        vd = _mm_packs_epi32(lo, hi);
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMUDL(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, u16(vs.u16(n) * vte.u16(n) >> 16));
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_mulhi_epu16(vs, vt(e));
++        ACCM = zero;
++        ACCH = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMUDM(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, s32(vs.s16(n) * vte.u16(n)));
++        }
++        vd = ACCM;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sign, vta;
++        ACCL = _mm_mullo_epi16(vs, vte);
++        ACCM = _mm_mulhi_epu16(vs, vte);
++        sign = _mm_srai_epi16(vs, 15);
++        vta = _mm_and_si128(vte, sign);
++        ACCM = _mm_sub_epi16(ACCM, vta);
++        ACCH = _mm_srai_epi16(ACCM, 15);
++        vd = ACCM;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMUDN(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, s32(vs.u16(n) * vte.s16(n)));
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sign, vsa;
++        ACCL = _mm_mullo_epi16(vs, vte);
++        ACCM = _mm_mulhi_epu16(vs, vte);
++        sign = _mm_srai_epi16(vte, 15);
++        vsa = _mm_and_si128(vs, sign);
++        ACCM = _mm_sub_epi16(ACCM, vsa);
++        ACCH = _mm_srai_epi16(ACCM, 15);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<bool U, u8 e>
++auto RSP::VMULF(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            accumulatorSet(n, (s64)vs.s16(n) * (s64)vte.s16(n) * 2 + 0x8000);
++            if constexpr (U == 0) {
++                vd.u16(n) = accumulatorSaturate(n, 1, 0x8000, 0x7fff);
++            }
++            if constexpr (U == 1) {
++                vd.u16(n) = ACCH.s16(n) < 0 ? 0x0000 : (ACCH.s16(n) ^ ACCM.s16(n)) < 0 ? 0xffff : ACCM.u16(n);
++            }
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), lo, hi, round, sign1, sign2, neq, eq, neg;
++        lo = _mm_mullo_epi16(vs, vte);
++        round = _mm_cmpeq_epi16(zero, zero);
++        sign1 = _mm_srli_epi16(lo, 15);
++        lo = _mm_add_epi16(lo, lo);
++        round = _mm_slli_epi16(round, 15);
++        hi = _mm_mulhi_epi16(vs, vte);
++        sign2 = _mm_srli_epi16(lo, 15);
++        ACCL = _mm_add_epi16(round, lo);
++        sign1 = _mm_add_epi16(sign1, sign2);
++        hi = _mm_slli_epi16(hi, 1);
++        neq = _mm_cmpeq_epi16(vs, vte);
++        ACCM = _mm_add_epi16(hi, sign1);
++        neg = _mm_srai_epi16(ACCM, 15);
++        if constexpr (!U) {
++            eq = _mm_and_si128(neq, neg);
++            ACCH = _mm_andnot_si128(neq, neg);
++            vd = _mm_add_epi16(ACCM, eq);
++        } else {
++            ACCH = _mm_andnot_si128(neq, neg);
++            hi = _mm_or_si128(ACCM, neg);
++            vd = _mm_andnot_si128(ACCH, hi);
++        }
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VMULQ(r128& vd, cr128& vs, cr128& vt) -> void {
++    cr128 vte = vt(e);
++    for (u32 n = 0; n < 8; n++) {
++        s32 product = (s16)vs.element(n) * (s16)vte.element(n);
++        if (product < 0) product += 31;  //round
++        ACCH.element(n) = product >> 16;
++        ACCM.element(n) = product >> 0;
++        ACCL.element(n) = 0;
++        vd.element(n) = sclamp<16>(product >> 1) & ~15;
++    }
++}
++
++template<u8 e>
++auto RSP::VNAND(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = ~(vs.u16(n) & vte.u16(n));
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_and_si128(vs, vt(e));
++        ACCL = _mm_xor_si128(ACCL, invert);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VNE(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = VCCL.set(n, vs.u16(n) != vte.u16(n) || VCOH.get(n)) ? vs.u16(n) : vte.u16(n);
++        }
++        VCCH = zero;  //unverified
++        VCOL = zero;
++        VCOH = zero;
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), eq, ne;
++        eq = _mm_cmpeq_epi16(vs, vte);
++        ne = _mm_cmpeq_epi16(eq, zero);
++        VCCL = _mm_and_si128(VCOH, eq);
++        VCCL = _mm_or_si128(VCCL, ne);
++        ACCL = _mm_blendv_epi8(vte, vs, VCCL);
++        VCCH = zero;
++        VCOH = zero;
++        VCOL = zero;
++        vd = ACCL;
++#endif
++    }
++}
++
++auto RSP::VNOP() -> void {
++}
++
++template<u8 e>
++auto RSP::VNOR(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = ~(vs.u16(n) | vte.u16(n));
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_or_si128(vs, vt(e));
++        ACCL = _mm_xor_si128(ACCL, invert);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VNXOR(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = ~(vs.u16(n) ^ vte.u16(n));
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_xor_si128(vs, vt(e));
++        ACCL = _mm_xor_si128(ACCL, invert);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VOR(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = vs.u16(n) | vte.u16(n);
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_or_si128(vs, vt(e));
++        vd = ACCL;
++#endif
++    }
++}
++
++template<bool L, u8 e>
++auto RSP::VRCP(r128& vd, u8 de, cr128& vt) -> void {
++    s32 result = 0;
++    s32 input = L && DIVDP ? DIVIN << 16 | vt.element(e & 7) : s16(vt.element(e & 7));
++    s32 mask = input >> 31;
++    s32 data = input ^ mask;
++    if (input > -32768) data -= mask;
++    if (data == 0) {
++        result = 0x7fff'ffff;
++    } else if (input == -32768) {
++        result = 0xffff'0000;
++    } else {
++        u32 shift = rt64RSPClz(data);
++        u32 index = (u64(data) << shift & 0x7fc0'0000) >> 22;
++        result = rspReciprocals[index];
++        result = (0x10000 | result) << 14;
++        result = result >> 31 - shift ^ mask;
++    }
++    DIVDP = 0;
++    DIVOUT = result >> 16;
++    ACCL = vt(e);
++    vd.element(de) = result;
++}
++
++template<u8 e>
++auto RSP::VRCPH(r128& vd, u8 de, cr128& vt) -> void {
++    ACCL = vt(e);
++    DIVDP = 1;
++    DIVIN = vt.element(e & 7);
++    vd.element(de) = DIVOUT;
++}
++
++template<bool D, u8 e>
++auto RSP::VRND(r128& vd, u8 vs, cr128& vt) -> void {
++    cr128 vte = vt(e);
++    for (u32 n = 0; n < 8; n++) {
++        s32 product = (s16)vte.element(n);
++        if (vs & 1) product <<= 16;
++        s64 acc = 0;
++        acc |= ACCH.element(n); acc <<= 16;
++        acc |= ACCM.element(n); acc <<= 16;
++        acc |= ACCL.element(n); acc <<= 16;
++        acc >>= 16;
++        if (D == 0 && acc < 0) acc = sclip<48>(acc + product);
++        if (D == 1 && acc >= 0) acc = sclip<48>(acc + product);
++        ACCH.element(n) = acc >> 32;
++        ACCM.element(n) = acc >> 16;
++        ACCL.element(n) = acc >> 0;
++        vd.element(n) = sclamp<16>(acc >> 16);
++    }
++}
++
++template<bool L, u8 e>
++auto RSP::VRSQ(r128& vd, u8 de, cr128& vt) -> void {
++    s32 result = 0;
++    s32 input = L && DIVDP ? DIVIN << 16 | vt.element(e & 7) : s16(vt.element(e & 7));
++    s32 mask = input >> 31;
++    s32 data = input ^ mask;
++    if (input > -32768) data -= mask;
++    if (data == 0) {
++        result = 0x7fff'ffff;
++    } else if (input == -32768) {
++        result = 0xffff'0000;
++    } else {
++        u32 shift = rt64RSPClz(data);
++        u32 index = (u64(data) << shift & 0x7fc0'0000) >> 22;
++        result = rspInverseSquareRoots[index & 0x1fe | shift & 1];
++        result = (0x10000 | result) << 14;
++        result = result >> (31 - shift >> 1) ^ mask;
++    }
++    DIVDP = 0;
++    DIVOUT = result >> 16;
++    ACCL = vt(e);
++    vd.element(de) = result;
++}
++
++template<u8 e>
++auto RSP::VRSQH(r128& vd, u8 de, cr128& vt) -> void {
++    ACCL = vt(e);
++    DIVDP = 1;
++    DIVIN = vt.element(e & 7);
++    vd.element(de) = DIVOUT;
++}
++
++template<u8 e>
++auto RSP::VSAR(r128& vd, cr128& vs) -> void {
++    switch (e) {
++    case 0x8: vd = ACCH; break;
++    case 0x9: vd = ACCM; break;
++    case 0xa: vd = ACCL; break;
++    default:  vd = zero; break;
++    }
++}
++
++template<u8 e>
++auto RSP::VSUB(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            s32 result = vs.s16(n) - vte.s16(n) - VCOL.get(n);
++            ACCL.s16(n) = result;
++            vd.s16(n) = sclamp<16>(result);
++        }
++        VCOL = zero;
++        VCOH = zero;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), udiff, sdiff, ov;
++        udiff = _mm_sub_epi16(vte, VCOL);
++        sdiff = _mm_subs_epi16(vte, VCOL);
++        ACCL = _mm_sub_epi16(vs, udiff);
++        ov = _mm_cmpgt_epi16(sdiff, udiff);
++        vd = _mm_subs_epi16(vs, sdiff);
++        vd = _mm_adds_epi16(vd, ov);
++        VCOL = zero;
++        VCOH = zero;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VSUBC(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            u32 result = vs.u16(n) - vte.u16(n);
++            ACCL.u16(n) = result;
++            VCOL.set(n, result >> 16);
++            VCOH.set(n, result != 0);
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), equal, udiff, diff0;
++        udiff = _mm_subs_epu16(vs, vte);
++        equal = _mm_cmpeq_epi16(vs, vte);
++        diff0 = _mm_cmpeq_epi16(udiff, zero);
++        VCOH = _mm_cmpeq_epi16(equal, zero);
++        VCOL = _mm_andnot_si128(equal, diff0);
++        ACCL = _mm_sub_epi16(vs, vte);
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VXOR(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCL.u16(n) = vs.u16(n) ^ vte.u16(n);
++        }
++        vd = ACCL;
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        ACCL = _mm_xor_si128(vs, vt(e));
++        vd = ACCL;
++#endif
++    }
++}
++
++template<u8 e>
++auto RSP::VZERO(r128& vd, cr128& vs, cr128& vt) -> void {
++    if constexpr (Accuracy::RSP::SISD) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            s32 result = vs.s16(n) + vte.s16(n);
++            ACCL.s16(n) = result;
++            vd.s16(n) = 0;
++        }
++    }
++
++    if constexpr (Accuracy::RSP::SIMD) {
++#if ARCHITECTURE_SUPPORTS_SSE4_1
++        r128 vte = vt(e), sum, min, max;
++        ACCL = _mm_add_epi16(vs, vte);
++        vd = _mm_xor_si128(vd, vd);
++#endif
++    }
++}
++
++#undef ACCH
++#undef ACCM
++#undef ACCL
++#undef VCOH
++#undef VCOL
++#undef VCCH
++#undef VCCL
++#undef VCE
++
++#undef DIVIN
++#undef DIVOUT
++#undef DIVDP
++
++#undef RSP_MEM_B
++}
++}

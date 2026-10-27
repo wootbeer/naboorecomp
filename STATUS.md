@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 16)
+## Overview (as of round 17)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -16,8 +16,9 @@ with the same game state as on an emulator (round 13). RT64 recognises
 Factor 5's graphics microcode and runs its display lists (triangles,
 matrices, lighting, text rectangles), and the splash screen and the first
 3D scene's models show, and the intro plays through to the Factor 5 logo
-(rounds 14-15). The terrain and backgrounds the
-microcode generates itself (commands `05`/`BE`) are next.
+(rounds 14-15). Since round 17 RT64 runs the microcode itself in an RSP
+interpreter, so the terrain it generates shows too; drawing its triangles
+in 3D (for widescreen and interpolation) is in progress.
 
 **How the main areas got here** (the rounds to read for each):
 
@@ -31,8 +32,9 @@ microcode generates itself (commands `05`/`BE`) are next.
 - **Runtime** (rounds 5-7, 13). osInitialize's clock rate, the shims the
   game needs, osYieldThread, VI events before a video mode; thread queue and
   osStopThread fixes, osViSetMode clearing osViBlack.
-- **Graphics** (rounds 10-13). Factor 5's microcode in RT64
-  (`lib-patches/rt64/0023`).
+- **Graphics** (rounds 10-17). Factor 5's microcode in RT64: HLE commands
+  (`lib-patches/rt64/0023`), then the microcode itself in an RSP
+  interpreter (`0024`, round 17).
 - **Checking against an emulator** (round 13). `tools/mupen_dump.c` and
   `tools/mupen_watch.c` run the game in mupen64plus's core to compare RAM
   and find which code writes an address.
@@ -42,16 +44,53 @@ the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
 
-## 2026-10-27, round 17 (in progress): reading the microcode for the terrain
+## 2026-10-27, round 17: running Factor 5's microcode itself
 
-The terrain, sky and other generated geometry (commands `05`, `BE`) are
-being worked out from Factor 5's microcode itself (round 16 for why).
+**What changed.** RT64 now runs the game's graphics microcode in an RSP
+interpreter (`lib-patches/rt64/0024`) instead of reimplementing its
+commands, and draws the RDP commands it produces. The terrain and the other
+geometry the microcode generates (`05`, `BE`) come out as on the N64: the
+snowy hills under the LucasArts intro show, and the logo's textures line up.
+`RT64_NABOO_HLE=1` goes back to round 16's HLE commands.
 
-**Reference pictures.** mupen64plus with its low-level RSP and RDP plugins
-(`mupen64plus-rsp-z64`, `mupen64plus-video-z64`) runs the real microcode
-and draws the game correctly: the snowy terrain under the LucasArts intro,
-the title screen's scene, the Naboo fly-over, the high-score screen.
-`tools/mupen_dump.c` now takes `NABOO_M64_GFX`/`NABOO_M64_RSP` to use them.
+**The interpreter** (`src/gbi/rt64_rsp_interpreter.{h,cpp}` in RT64).
+Scalar unit written here; the vector unit is ares's, as adapted in
+librecomp (`rt64_rsp_vu.h`, ISC licence, wrapped in a namespace). DMAs and
+the RDP finish at once. The microcode's RDP command buffer is pointed past
+the end of RDRAM, into memory of the interpreter's own, so nothing of the
+game's is overwritten; each write to `DPC_END` hands the new commands to
+RT64's `Interpreter::processRDPLists`. About 2-9 ms a frame on the intro.
+
+**Checked against the reference.** The interpreter's RDP output for the
+captured tasks 120, 600 and 1200 is byte-identical to mupen64plus's
+low-level RSP (round 17's `tools/rsp_reference.c`). Task 900 differs in
+three words, from z64 itself: fuzzing single vector instructions on both
+showed z64's `VRSQ` returning 0 and its `VABS`/`VMOV` accumulators differing
+from ares (which matches hardware); all the other instructions agree. Two
+bugs were found on the way:
+
+- librecomp's `RSP_MEM_B` reads DMEM bytes as signed, so `LUV`/`LHV`/`LFV`
+  (`byte << 7`) sign-extend: shade colours above 0x7F came out negative.
+  The RT64 copy reads them unsigned, as ares does. (Audio's microcode
+  doesn't use those instructions.)
+- The ares code relies on type punning through unions: with strict
+  aliasing, GCC at -O2 dropped `VMOV`'s result. The file is built with
+  `-fno-strict-aliasing` (and `-msse4.1`).
+
+**Next: triangles in 3D.** Drawing the RDP's triangles gives RT64 only
+screen positions, so no widescreen and no frame interpolation. Started: the
+interpreter stops at the vertex transform (`0x1890`/`0x195C`) to load the
+model-space vertices and combined matrix into RT64, and at the triangle
+routine (`0x11A8`; `$11`-`$13` the vertices in DMEM) to draw the triangle
+from them, with the microcode's own back-face test (bit 13 of `$21`) done
+in clip space, and the RDP commands waiting in DMEM sent first so the order
+holds. The geometry comes out in place, but textures and colours don't
+yet, so it's off unless `RT64_NABOO_3D_TRIANGLES=1`.
+
+**Still black after the Factor 5 logo** with the real microcode, with the
+logo faintly left on screen: the next thing to look at.
+
+### Before: reading the microcode for the terrain
 
 **The microcode's layout** (`tools/rsp_disasm.py` disassembles it):
 
