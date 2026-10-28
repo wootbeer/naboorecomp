@@ -113,6 +113,25 @@ not for the recompiled game code), and crash_log.txt adds the host function
 the fault is in and the host functions found on the stack (DbgHelp's
 `SymFromAddr`; `dladdr` on Linux).
 
+**Crackling audio.** `NABOO_AUDIO_QUEUE_STATS=1` prints how the output queue
+looks each time the game hands over audio. The game delivers 192 frames
+(~9 ms at 22050 Hz) at a time, only as fast as it plays, and 70% of the
+time the queue was already empty: a gap each time. Playback now starts once
+50 ms is queued and pauses to rebuild that if the queue runs dry. Here,
+under software rendering, the game makes audio at 52% of real time, so it
+still runs dry; on a machine running the game at full speed it shouldn't.
+(A thread at `func_41009EDC` takes most of a core: it receives from the
+queue at `0x40097108` and sends itself the next message, a background
+worker the N64 runs in its idle time, so that's by design.)
+
+**The crash at the craft selection** was the program exiting (the crash was
+RmlUi's static destructors running under the game's threads); the game's
+stack pointed at `osPfsReadWriteFile`. librecomp's fatal errors (a function
+address it doesn't know, a `break`, a switch out of range) printed to
+stderr, which a Windows release build doesn't have, and called `exit`.
+`lib-patches/N64ModernRuntime/0008` shows them in a message box and uses
+`quick_exit`.
+
 ## 2026-10-27, round 17: running Factor 5's microcode itself
 
 **What changed.** RT64 now runs the game's graphics microcode in an RSP

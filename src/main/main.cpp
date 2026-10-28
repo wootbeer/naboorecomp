@@ -269,6 +269,14 @@ static constexpr uint32_t audio_headroom_vis = 2;
 static constexpr uint32_t audio_soft_cap_ms = 200;
 static constexpr uint32_t audio_hard_cap_ms = 500;
 
+// Playback cushion. Battle for Naboo hands over audio in small chunks (192
+// frames, ~9 ms at 22050 Hz) only as fast as it plays, so with nothing queued
+// ahead, every late chunk was a gap: the queue was found empty about 70% of
+// the time, which was the crackle. Playback starts once this much is queued,
+// and pauses to build it up again if the queue ever runs dry.
+static constexpr uint32_t audio_cushion_ms = 50;
+static bool audio_playing = false;
+
 static bool open_audio_device(uint32_t frequency) {
     std::lock_guard<std::mutex> lock(audio_mutex);
 
@@ -292,7 +300,8 @@ static bool open_audio_device(uint32_t frequency) {
         return false;
     }
 
-    SDL_PauseAudioDevice(audio_device, 0);
+    // Paused until the cushion is queued (queue_samples).
+    audio_playing = false;
     return true;
 }
 
@@ -316,10 +325,35 @@ static void queue_samples(int16_t* audio_data, size_t sample_count) {
     static const bool no_audio_cap = [] { const char* v = std::getenv("NABOO_NO_AUDIO_CAP"); return v != nullptr && v[0] != '\0' && v[0] != '0'; }();
     if (no_audio_cap) {
         SDL_QueueAudio(audio_device, buffer.data(), static_cast<Uint32>(sample_count * sizeof(float)));
+        if (!audio_playing) {
+            SDL_PauseAudioDevice(audio_device, 0);
+            audio_playing = true;
+        }
         return;
     }
     const size_t bytes_per_ms = game_frequency * audio_channels * sizeof(float) / 1000;
     const size_t queued_bytes = SDL_GetQueuedAudioSize(audio_device);
+    static const bool audio_stats = std::getenv("NABOO_AUDIO_QUEUE_STATS") != nullptr;
+    if (audio_stats) {
+        static size_t chunks = 0, empty = 0, dropped = 0, min_ms = 100000, max_ms = 0;
+        chunks++;
+        const size_t ms = queued_bytes / bytes_per_ms;
+        if (queued_bytes == 0) empty++;
+        if (queued_bytes > audio_soft_cap_ms * bytes_per_ms) dropped++;
+        min_ms = std::min(min_ms, ms);
+        max_ms = std::max(max_ms, ms);
+        static auto last_time = std::chrono::steady_clock::now();
+        if ((chunks % 200) == 0) {
+            const auto now = std::chrono::steady_clock::now();
+            const double seconds = std::chrono::duration<double>(now - last_time).count();
+            last_time = now;
+            printf("[audio queue] %zu chunks of %zu frames at %u Hz: %zu found it empty, %zu dropped, queued %zu-%zu ms, %.0f%% of real time\n",
+                chunks, sample_count / 2, game_frequency, empty, dropped, min_ms, max_ms,
+                100.0 * (200.0 * (sample_count / 2) / game_frequency) / seconds);
+            fflush(stdout);
+            empty = dropped = 0; min_ms = 100000; max_ms = 0;
+        }
+    }
     if (queued_bytes > audio_hard_cap_ms * bytes_per_ms) {
         printf("[NABOO AUDIO] %zu ms queued, resyncing\n", queued_bytes / bytes_per_ms);
         fflush(stdout);
@@ -328,7 +362,17 @@ static void queue_samples(int16_t* audio_data, size_t sample_count) {
     else if (queued_bytes > audio_soft_cap_ms * bytes_per_ms) {
         return;
     }
+    if (audio_playing && queued_bytes == 0) {
+        // Ran dry: wait for the cushion again rather than playing each chunk as it comes.
+        SDL_PauseAudioDevice(audio_device, 1);
+        audio_playing = false;
+    }
+
     SDL_QueueAudio(audio_device, buffer.data(), static_cast<Uint32>(sample_count * sizeof(float)));
+    if (!audio_playing && SDL_GetQueuedAudioSize(audio_device) >= audio_cushion_ms * bytes_per_ms) {
+        SDL_PauseAudioDevice(audio_device, 0);
+        audio_playing = true;
+    }
 }
 
 static size_t get_frames_remaining() {
