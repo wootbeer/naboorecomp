@@ -1,0 +1,83 @@
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 8f0ca10..41b14dd 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -124,6 +124,9 @@ void init_audio();
+ void set_audio_frequency(uint32_t freq);
+ void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
+ uint32_t get_remaining_audio_bytes();
++// How many AI interrupts to raise at this VI so the audio queued for playback stays near a
++// target: the game answers each one with a buffer (see events.cpp).
++uint32_t ai_events_due();
+ 
+ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index 3198be0..81cdac9 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -1,5 +1,7 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
++#include <algorithm>
++#include <atomic>
+ #include <cassert>
+ 
+ static uint32_t sample_rate = 48000;
+@@ -22,7 +24,37 @@ void ultramodern::set_audio_frequency(uint32_t freq) {
+     sample_rate = freq;
+ }
+ 
++// AI interrupts. On the N64 the AI raises one each time it starts playing a buffer, which
++// is when games that double-buffer (instead of asking osAiGetLength) hand it the next one.
++// Raising one per VI, as before, paced those games at 60 buffers a second whatever the
++// buffers' size: Battle for Naboo's 192-frame buffers came out at 52% of real time.
++// Instead, each VI raises as many as it takes to bring the queued audio up to a target,
++// in the game's own buffer size. (A game answers within a VI, so what it was asked for
++// at the last one has arrived by the next.)
++static std::atomic<uint32_t> ai_last_buffer_bytes{ 0 };
++static constexpr uint32_t ai_target_ms = 75;
++static constexpr uint32_t ai_max_events_per_vi = 3;
++
++uint32_t ultramodern::ai_events_due() {
++    const uint32_t buffer_bytes = ai_last_buffer_bytes.load();
++    if (buffer_bytes == 0 || audio_callbacks.get_frames_remaining == nullptr) {
++        // Nothing queued yet: one per VI, to start the game off.
++        return 1;
++    }
++
++    const uint64_t queued_bytes = uint64_t(audio_callbacks.get_frames_remaining()) * 2 * sizeof(int16_t);
++    const uint64_t target_bytes = uint64_t(sample_rate) * 2 * sizeof(int16_t) * ai_target_ms / 1000;
++    uint32_t due = 0;
++    if (queued_bytes < target_bytes) {
++        due = uint32_t((target_bytes - queued_bytes + buffer_bytes - 1) / buffer_bytes);
++    }
++
++    return std::min(due, ai_max_events_per_vi);
++}
++
+ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_t byte_count) {
++    ai_last_buffer_bytes.store(byte_count);
++
+     // Ensure that the byte count is an integer multiple of samples.
+     assert((byte_count & 1) == 0);
+ 
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 5b6e56a..d8c0d34 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -255,8 +255,12 @@ void vi_thread_func() {
+                 remaining_retraces = cur_state->retrace_count;
+             }
+             if (events_context.ai.mq != NULLPTR) {
+-                // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
+-                ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
++                // As many AI interrupts as playback needs (audio.cpp), each not requeued if the
++                // queue was full for the same reason as the VI message above.
++                const uint32_t ai_events = ultramodern::ai_events_due();
++                for (uint32_t i = 0; i < ai_events; i++) {
++                    ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
++                }
+             }
+         }
+ 

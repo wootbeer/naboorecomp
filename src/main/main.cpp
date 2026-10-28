@@ -203,6 +203,7 @@ static int SDLCALL close_watch(void*, SDL_Event* event) {
 
 // F12 saves the next graphics task for offline study (src/game/gfx_dump.cpp).
 extern "C" void naboo_request_gfx_dump();
+void naboo_install_exit_trace();
 static int dump_key_watch(void*, SDL_Event* event) {
     if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F12 && event->key.repeat == 0) {
         naboo_request_gfx_dump();
@@ -596,6 +597,9 @@ int main(int argc, char** argv) {
 
     // recompui's own default launcher menu is used -- no
     // register_launcher_init_callback call here (see file-level comment).
+
+    // Last of the atexit handlers, so it runs first (src/main/crash_handler.cpp).
+    naboo_install_exit_trace();
 
     recomp::start({
         .argc = argc,

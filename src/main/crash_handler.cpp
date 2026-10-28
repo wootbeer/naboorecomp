@@ -9,6 +9,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <vector>
@@ -19,6 +20,7 @@
 #elif defined(__linux__)
 #include <csignal>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <pthread.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -415,6 +417,57 @@ void naboo_report_fatal_error(const char* message) {
 // from a per-frame hook).
 extern "C" void naboo_crash_note_rdram(uint8_t* rdram) {
     rdram_base = rdram;
+}
+
+// Something called exit(). A normal quit ends with _Exit (src/main/main.cpp), so this is
+// the runtime or a library giving up: exit() would then run static destructors under the
+// game's still-running threads and crash in them (RmlUi's, as reported), hiding the cause.
+// Registered last, this atexit handler runs first: it saves the calls that led to exit()
+// to exit_log.txt and ends the process before the destructors run.
+static void exit_trace() {
+    void* frames[62];
+#if defined(_WIN32)
+    const int count = CaptureStackBackTrace(0, 62, frames, nullptr);
+#elif defined(__linux__)
+    const int count = backtrace(frames, 62);
+#else
+    const int count = 0;
+#endif
+    for (FILE* out : { stderr, fopen("exit_log.txt", "w") }) {
+        if (out == nullptr) {
+            continue;
+        }
+        fprintf(out, "Battle for Naboo Recompiled was told to exit (exit() was called).\n");
+        fprintf(out, "Calls leading to it (most recent first):\n");
+        for (int i = 0; i < count; i++) {
+            const uintptr_t addr = (uintptr_t)frames[i];
+            char name[320];
+            if (const GameFunc* f = find_game_func(addr)) {
+                fprintf(out, "  func_%08X\n", f->vram);
+            }
+            else if (host_symbol(addr, name, sizeof(name))) {
+                fprintf(out, "  %s\n", name);
+            }
+            else {
+                fprintf(out, "  0x%" PRIxPTR "\n", addr);
+            }
+        }
+        fflush(out);
+        if (out != stderr) {
+            fclose(out);
+        }
+    }
+#if defined(_WIN32)
+    MessageBoxA(nullptr,
+        "The game stopped unexpectedly. Details were saved to exit_log.txt in the game's folder -- "
+        "please include that file when reporting the problem.",
+        "Battle for Naboo Recompiled", MB_OK | MB_ICONERROR);
+#endif
+    std::_Exit(EXIT_FAILURE);
+}
+
+void naboo_install_exit_trace() {
+    atexit(exit_trace);
 }
 
 void naboo_install_crash_handler(const SectionTableEntry* sections, size_t num_sections) {

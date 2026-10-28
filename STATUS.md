@@ -124,6 +124,17 @@ still runs dry; on a machine running the game at full speed it shouldn't.
 queue at `0x40097108` and sends itself the next message, a background
 worker the N64 runs in its idle time, so that's by design.)
 
+**The real cause of the choppy audio: AI interrupts.** The game doesn't ask
+`osAiGetLength`: its audio thread (`func_40033E00`) waits on the
+`OS_EVENT_AI` queue and hands the AI one 192-frame buffer per message,
+as the N64's AI raises its interrupt each time it starts a buffer. The
+runtime raised one per VI, so 60 buffers a second: 11,520 frames against
+22,050, the 52% measured, on any machine. `lib-patches/N64ModernRuntime/0009`
+raises, at each VI, as many as it takes to bring the queued audio up to
+75 ms, in the game's buffer size (at most three; the game's queue holds
+four). Measured after: 100% of real time, the queue never empty, nothing
+dropped.
+
 **The crash at the craft selection** was the program exiting (the crash was
 RmlUi's static destructors running under the game's threads); the game's
 stack pointed at `osPfsReadWriteFile`. librecomp's fatal errors (a function
@@ -131,6 +142,12 @@ address it doesn't know, a `break`, a switch out of range) printed to
 stderr, which a Windows release build doesn't have, and called `exit`.
 `lib-patches/N64ModernRuntime/0008` shows them in a message box and uses
 `quick_exit`.
+The same crash was reported again with that in place, so something else
+calls `exit()`. A normal quit ends with `_Exit`, so any `exit()` is the
+runtime or a library giving up: an `atexit` handler registered just before
+`recomp::start` (so it runs first) now writes the calls that led to it to
+exit_log.txt, shows a message and ends the process before the static
+destructors run.
 
 ## 2026-10-27, round 17: running Factor 5's microcode itself
 
