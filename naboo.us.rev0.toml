@@ -46,6 +46,16 @@ func = "func_40037A60"
 before_vram = 0x40037A7C
 text = "    { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
 
+# func_40033584: whether all of the sound engine's voices (0x60-byte entries
+# at *0x40080390, active flag at +8) have finished; $s1 is set while any
+# hasn't. Its five callers (the title screen's setup among them, after the
+# Factor 5 logo) spin on it, waiting for the audio thread to clear the flags
+# (STATUS.md round 18).
+[[patches.hook]]
+func = "func_40033584"
+before_vram = 0x40033600
+text = "    if (ctx->r17 != 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
+
 # func_400236E4 has no return: on the N64 it runs straight on into
 # func_40023734, which is also called on its own. Recompiled functions don't
 # fall through into the next one, so do it here (from its last instruction).

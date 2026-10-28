@@ -435,7 +435,7 @@ index 737b013..bc78f51 100644
              nextChunkStack.push_back((*dl)->w0 & 0xFFFFFF);
 diff --git a/src/gbi/rt64_rsp_interpreter.cpp b/src/gbi/rt64_rsp_interpreter.cpp
 new file mode 100644
-index 0000000..474b593
+index 0000000..4adf056
 --- /dev/null
 +++ b/src/gbi/rt64_rsp_interpreter.cpp
 @@ -0,0 +1,437 @@
@@ -449,17 +449,12 @@ index 0000000..474b593
 +
 +namespace RT64 {
 +    namespace RSPVU {
-+        uint8_t *dmem = nullptr;
++        thread_local uint8_t *dmem = nullptr;
 +        uint16_t rspReciprocals[512];
 +        uint16_t rspInverseSquareRoots[512];
 +
 +        // From ares (see rt64_rsp_vu.h for its license).
-+        static void initConstants() {
-+            static bool initialized = false;
-+            if (initialized) {
-+                return;
-+            }
-+
++        static bool computeConstants() {
 +            rspReciprocals[0] = u16(~0);
 +            for (u16 index = 1; index < 512; index++) {
 +                u64 a = index + 512;
@@ -474,7 +469,12 @@ index 0000000..474b593
 +                rspInverseSquareRoots[index] = u16(b >> 1);
 +            }
 +
-+            initialized = true;
++            return true;
++        }
++
++        static void initConstants() {
++            static const bool initialized = computeConstants();
++            (void)initialized;
 +        }
 +    };
 +
@@ -961,10 +961,10 @@ index 0000000..e3cc03b
 +};
 diff --git a/src/gbi/rt64_rsp_vu.h b/src/gbi/rt64_rsp_vu.h
 new file mode 100644
-index 0000000..03f6a5d
+index 0000000..23e8838
 --- /dev/null
 +++ b/src/gbi/rt64_rsp_vu.h
-@@ -0,0 +1,1746 @@
+@@ -0,0 +1,1747 @@
 +// This file is modified from the Ares N64 emulator core. Ares can
 +// be found at https://github.com/ares-emulator/ares. The original license
 +// for this portion of Ares is as follows:
@@ -1013,8 +1013,9 @@ index 0000000..03f6a5d
 +using v128 = __m128i;
 +#endif
 +
-+// DMEM in RDRAM's 32-bit word-swapped layout (byte N at N ^ 3).
-+extern uint8_t *dmem;
++// DMEM in RDRAM's 32-bit word-swapped layout (byte N at N ^ 3). Per thread: more than one
++// interpreter can run at once (graphics in RT64, audio in the game's RSP thread).
++extern thread_local uint8_t *dmem;
 +extern uint16_t rspReciprocals[512];
 +extern uint16_t rspInverseSquareRoots[512];
 +

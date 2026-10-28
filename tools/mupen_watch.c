@@ -4,7 +4,8 @@
 // through both its 0x40xxxxxx and 0x80xxxxxx addresses.
 //   gcc -O1 -o mupen_watch tools/mupen_watch.c -ldl
 //   SDL_AUDIODRIVER=dummy ./mupen_watch game.z64 0x4004C68C 8 520
-// See tools/mupen_dump.c for the packages it needs.
+// See tools/mupen_dump.c for the packages it needs, and for NABOO_M64_GFX /
+// NABOO_M64_RSP (the low-level plugins get past the intro).
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,10 +64,11 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     void *rom = malloc(n); if (fread(rom, 1, n, f) != (size_t)n) return 1; fclose(f);
     if (doCmd(M64CMD_ROM_OPEN, n, rom) != M64ERR_SUCCESS) { fprintf(stderr, "rom open failed\n"); return 1; }
-    plugin("mupen64plus-video-rice.so", core, M64PLUGIN_GFX);
+    const char *gfx = getenv("NABOO_M64_GFX"), *rsp = getenv("NABOO_M64_RSP");
+    plugin(gfx != NULL ? gfx : "mupen64plus-video-rice.so", core, M64PLUGIN_GFX);
     plugin("mupen64plus-audio-sdl.so", core, M64PLUGIN_AUDIO);
     plugin("mupen64plus-input-sdl.so", core, M64PLUGIN_INPUT);
-    plugin("mupen64plus-rsp-hle.so", core, M64PLUGIN_RSP);
+    plugin(rsp != NULL ? rsp : "mupen64plus-rsp-hle.so", core, M64PLUGIN_RSP);
     m64p_breakpoint b;
     b.address = watchAddr; b.endaddr = watchAddr + watchLen - 1; b.flags = M64P_BKP_FLAG_ENABLED | M64P_BKP_FLAG_WRITE;
     bp(M64P_BKP_CMD_ADD_STRUCT, 0, &b);

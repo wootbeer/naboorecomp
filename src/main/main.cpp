@@ -101,6 +101,9 @@ template <typename... Ts>
 RspExitReason musyx_audio(uint8_t* rdram, uint32_t ucode_addr);
 #endif
 
+// src/game/rsp_audio.cpp: the same microcode run in an RSP interpreter (STATUS.md round 18).
+RspExitReason musyx_audio_interpreted(uint8_t* rdram, uint32_t ucode_addr);
+
 // NABOO_NO_AUDIO=1 skips the audio tasks (for telling audio problems apart from others).
 static RspExitReason skip_audio_task(uint8_t*, uint32_t) {
     return RspExitReason::Broke;
@@ -108,13 +111,17 @@ static RspExitReason skip_audio_task(uint8_t*, uint32_t) {
 
 static RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     switch (task->t.type) {
-#ifdef NABOO_HAS_RSP_AUDIO
     case M_AUDTASK:
         if (getenv("NABOO_NO_AUDIO") != nullptr) {
             return skip_audio_task;
         }
-        return musyx_audio;
+#ifdef NABOO_HAS_RSP_AUDIO
+        // NABOO_AUDIO_RECOMP=1: the unfinished RSPRecomp version instead.
+        if (getenv("NABOO_AUDIO_RECOMP") != nullptr) {
+            return musyx_audio;
+        }
 #endif
+        return musyx_audio_interpreted;
     default:
         fprintf(stderr, "No RSP microcode registered for task type %" PRIu32 ".\n", task->t.type);
         return nullptr;

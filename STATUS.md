@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 17)
+## Overview (as of round 18)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,44 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-28, round 18: stuck after the Factor 5 logo: the audio microcode
+
+**Not the graphics.** After the Factor 5 logo the screen stayed black with
+the logo faintly on it. mupen64plus (with the low-level plugins) goes on to
+the title screen, drawn into colour image `0x8076F000`; the port never got
+there. gdb showed the main game thread spinning in `func_4100220C` (the
+title screen's setup) on `func_40033584`, which returns 1 once every entry
+of the sound engine's voice table (`*0x40080390`, 0x60 bytes each, active
+flag at +8) has ended. Two voices from the logo never ended. (+0 is the
+sound's length as a double, set when it starts in `func_40024060`.)
+
+Two causes:
+
+- **The spin never yields.** Game threads only switch at OS calls here, so
+  the threads that end voices couldn't run. `func_40033584` has five
+  callers, all `jal func_40033584; beq $v0, $zero, loop`; a hook where it
+  computes its result (`0x40033600`) yields when a voice is still playing,
+  as for round 12's frame wait.
+- **The voices end from the audio microcode's results**, and the MusyX
+  microcode recompiled by RSPRecomp (round 5) was never finished (it runs
+  past the end of IMEM and through jump tables RSPRecomp couldn't follow),
+  and `NABOO_NO_AUDIO` skips it altogether. Now the audio task runs in
+  round 17's RSP interpreter (`src/game/rsp_audio.cpp`, using RT64's
+  `RSPInterpreter`), starting from the task's own RSP boot code in IMEM 0
+  as `osSpTaskLoad` leaves it, so the boot loads the microcode itself.
+  `NABOO_AUDIO_RECOMP=1` uses the RSPRecomp version.
+
+**A race between the two interpreters.** The first runs failed audio task
+1083 or so (spinning until the instruction limit), though the same task
+captured with `NABOO_DUMP_AUDIO_FAIL=1` ran fine offline and matched z64.
+The vector unit reaches DMEM through one global pointer, set at the start
+of each run, and graphics (RT64's thread) and audio (the RSP task thread)
+now run at the same time, so one could load and store through the other's
+DMEM. The pointer is thread-local now.
+
+**Still to confirm:** that the title screen now follows the logo (the test
+run under software rendering was still in progress at this commit).
 
 ## 2026-10-27, round 17: running Factor 5's microcode itself
 
