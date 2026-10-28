@@ -37,11 +37,21 @@ RspExitReason musyx_audio_interpreted(uint8_t* rdram, uint32_t ucode_addr) {
         rsp->imem[i ^ 3] = rdram[((boot_address + i) & 0x7FFFFF) ^ 3];
     }
 
-    // NABOO_DUMP_AUDIO=n saves the n-th audio task (RAM and OSTask, as NABOO_DUMP_GFX does) for
-    // tools/rsp_reference.c.
+    // NABOO_DUMP_AUDIO=n (or n-m) saves the n-th audio task (to the m-th: RAM and OSTask, as
+    // NABOO_DUMP_GFX does) for tools/rsp_reference.c.
     static int task_count = 0;
     task_count++;
-    if (const char* dump = getenv("NABOO_DUMP_AUDIO"); (dump != nullptr) && (atoi(dump) == task_count)) {
+    static int dump_first = 0, dump_last = -1;
+    static const bool dump_parsed = [] {
+        if (const char* dump = getenv("NABOO_DUMP_AUDIO")) {
+            dump_first = atoi(dump);
+            const char* dash = strchr(dump, '-');
+            dump_last = (dash != nullptr) ? atoi(dash + 1) : dump_first;
+        }
+        return true;
+    }();
+    (void)dump_parsed;
+    if ((task_count >= dump_first) && (task_count <= dump_last)) {
         const char* dir_env = getenv("NABOO_DUMP_DIR");
         std::string base = std::string(dir_env != nullptr ? dir_env : ".") + "/aud_" + std::to_string(task_count);
         if (FILE* f = fopen((base + ".rdram").c_str(), "wb")) {

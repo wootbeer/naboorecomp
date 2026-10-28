@@ -211,6 +211,17 @@ static int dump_key_watch(void*, SDL_Event* event) {
     return 1;
 }
 
+// The menus' cursor (RmlUi's) stays as it was when the last menu closed -- a pointing hand
+// after clicking a launcher button -- since nothing under the mouse sets it any more. Put the
+// arrow back as the mouse moves over the game. (Event watches run on the thread that polls
+// events, the one SDL_SetCursor wants.)
+static int cursor_reset_watch(void*, SDL_Event* event) {
+    if (event->type == SDL_MOUSEMOTION && !recompui::is_any_context_shown() && SDL_GetCursor() != SDL_GetDefaultCursor()) {
+        SDL_SetCursor(SDL_GetDefaultCursor());
+    }
+    return 1;
+}
+
 static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
 
     uint32_t flags = SDL_WINDOW_RESIZABLE;
@@ -230,6 +241,7 @@ static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callba
     set_window_icon(window);
     SDL_AddEventWatch(close_watch, nullptr);
     SDL_AddEventWatch(dump_key_watch, nullptr);
+    SDL_AddEventWatch(cursor_reset_watch, nullptr);
 
 #if defined(_WIN32)
     SDL_SysWMinfo wm_info;

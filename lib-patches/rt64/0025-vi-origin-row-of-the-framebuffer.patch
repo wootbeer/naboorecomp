@@ -1,0 +1,18 @@
+diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
+index a870166..3c50c57 100644
+--- a/src/hle/rt64_vi.cpp
++++ b/src/hle/rt64_vi.cpp
+@@ -80,8 +80,12 @@ namespace RT64 {
+ 
+         // Estimate the origin is off by one or two rows.
+         if (siz >= G_IM_SIZ_16b) {
++            // A row of the framebuffer, not of the VI: in interlaced modes that read every
++            // other row, the VI width is double the framebuffer's (see fbSize), and the
++            // origin is one framebuffer row in.
+             const bool interlacedStep = status.serrate && (vCurrentLine & 0x1);
+-            const uint32_t rowBytes = width * (1U << (siz - 1));
++            const uint32_t rowWidth = fbSize().x;
++            const uint32_t rowBytes = rowWidth * (1U << (siz - 1));
+             const uint32_t rowCount = interlacedStep ? 2 : 1;
+             const uint32_t rowOffset = rowBytes * rowCount;
+             if (origin >= rowOffset) {

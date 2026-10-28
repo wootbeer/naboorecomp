@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 18)
+## Overview (as of round 19)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,46 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-28, round 19: craft select, the black title, the launcher's cursor
+
+**Craft select ended the game** ("Failed to find function at 0x410DA29C",
+reproduced here by holding Start/A through the menus with xdotool). The
+hand-written routines at the end of `.paged` (round 4) call small helpers
+through `$t3`: `func_410DA0A4` sets `$t3` to `$ra` (from the `bltzal $zero`,
+patched to a lui/addiu) plus an offset, and `func_410DA1F8` does `jalr $t3`
+eight times. The four targets, `0x410DA29C`, `0x410DA2B4`, `0x410DA2C4` and
+`0x410DA2DC` (four entry points into one routine that scales two values and
+clamps the sum), were taken for data after `func_410DA1F8`. They're now
+functions in the symbol file, each running to the shared `jr $ra` at
+`0x410DA328`.
+
+**The title screen was black** (music playing). Not the blanked mode copy
+at `0x40080070` suspected last round: that's only set for a frame while the
+game switches modes. Logging `osViSetMode` and `osViSwapBuffer` showed the
+title sets `0x40080180` and swaps `0x8076F000`, as on mupen. That mode is
+the 512x448 interlaced one: the VI width register is 1024 (two framebuffer
+rows, so each field reads every other row) and field 0's origin is one row,
+`0x400` bytes, in. RT64 halves the width for such modes (`VI::fbSize`) but
+`VI::fbAddress` stepped back one row of the *VI* width, 2048 bytes, to
+`0x8076EC00`: no framebuffer there, so RT64 showed RDRAM, which is near
+empty (RT64 draws to the GPU). `lib-patches/rt64/0025` steps back a row of
+the framebuffer's width. The intro's 400x448 mode (VI width 400) and all
+non-interlaced modes are unchanged, since their row width is the VI's.
+
+**The pointing-hand cursor stayed after the launcher.** RmlUi sets the
+cursor for what's under the mouse, and nothing does once the menus close.
+`src/main/main.cpp`'s `cursor_reset_watch` puts the arrow back on mouse
+motion while no menu is shown.
+
+**Not fixed: skipping the LucasArts logo.** A Start/A press during the
+LucasArts snow scene fades it nearly to black and the game stays there (it
+keeps drawing the dark scene). The same with real-time (SDL's dummy driver)
+or no audio tasks, so it isn't the audio. Next: find what the intro's
+process waits for after the fade (the game thread in `func_410A6778` waits
+on a message queue; `func_41009EDC`'s thread is in `osStartThread`).
+
+`NABOO_DUMP_AUDIO` takes a range, `n-m`.
 
 ## 2026-10-28, round 18: stuck after the Factor 5 logo: the audio microcode
 
