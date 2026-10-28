@@ -27,7 +27,7 @@ index cd16f1c..431c13e 100644
      add_library(rt64 STATIC ${SOURCES})
  else()
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 737b013..bc78f51 100644
+index 737b013..9208da1 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -7,13 +7,17 @@
@@ -48,7 +48,7 @@ index 737b013..bc78f51 100644
  
  // How the microcode's commands behave was worked out by olivieryuyu for
  // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
-@@ -91,15 +95,359 @@ namespace RT64 {
+@@ -91,15 +95,371 @@ namespace RT64 {
              *dl = rdramDisplayList(state, address);
          }
  
@@ -98,8 +98,7 @@ index 737b013..bc78f51 100644
 +        // transform to load the same vertices (and matrix) into RT64, and at its triangle
 +        // routine to draw the triangle from them. Everything else the microcode does
 +        // (lighting, texture coordinates, its other RDP commands) carries on as written.
-+        // Off unless RT64_NABOO_3D_TRIANGLES=1 until the camera can be told apart from the combined
-+        // matrices (RT64's frame interpolation needs it); otherwise RT64 draws the microcode's RDP triangles.
++        // RT64_NABOO_RDP_TRIANGLES=1 draws the microcode's own RDP triangles instead (screen space only).
 +
 +        // IMEM addresses (as the interpreter sees them, within the 4 KB of IMEM).
 +        constexpr uint32_t HookTriangle = 0x1A8;            // 0x040011A8: the triangle routine, $11-$13 its vertices.
@@ -130,12 +129,25 @@ index 737b013..bc78f51 100644
 +        static bool hookViewportLoaded = false;
 +
 +        static bool useTriangleHooks() {
-+            static const bool use3DTriangles = []() {
-+                const char *value = getenv("RT64_NABOO_3D_TRIANGLES");
++            static const bool useRDPTriangles = []() {
++                const char *value = getenv("RT64_NABOO_RDP_TRIANGLES");
 +                return (value != nullptr) && (value[0] == '1');
 +            }();
 +
-+            return use3DTriangles;
++            return !useRDPTriangles;
++        }
++
++        // Each object comes with its own matrix combining the camera, so RT64 can't pair them up
++        // between frames to interpolate (models come apart). Until the camera can be told apart,
++        // nothing is interpolated: frames show as the game makes them.
++        static void disableInterpolation(State *state) {
++            RSP *rsp = state->rsp.get();
++            for (bool proj : { false, true }) {
++                rsp->matrixId(G_EX_ID_IGNORE, false, proj, false,
++                    G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
++                    G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
++                    G_EX_ORDER_AUTO, G_EX_ASPECT_AUTO, G_EX_EDIT_ALLOW, false, false);
++            }
 +        }
 +
 +        static float dmemFixed(uint32_t intAddress, uint32_t fracAddress) {
@@ -398,25 +410,29 @@ index 737b013..bc78f51 100644
 +
 +            for (uint32_t i = 0; i < std::size(task); i++) {
 +                rsp->setDMEMWord(0xFC0 + i * 4, task[i]);
-+            }
-+
+             }
+ 
 +            memset(rsp->gpr, 0, sizeof(rsp->gpr));
 +            rsp->setPc(0);
 +            const RSPInterpreter::Result result = rsp->run(200000000ULL);
 +            if (result != RSPInterpreter::Result::Broke) {
 +                fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
-             }
++            }
 +        }
- 
++
 +        void beginDisplayList(State *state, DisplayList **dl) {
              // The microcode only ever takes the combined model-view-projection matrix (forced
              // through RSP::forceMatrixFromData), so the projection RT64 composes with is the identity.
              RSP *rsp = state->rsp.get();
-@@ -111,6 +459,20 @@ namespace RT64 {
+@@ -111,6 +471,24 @@ namespace RT64 {
              rsp->projectionMatrixInversed = true;
              rsp->projectionMatrixChanged = true;
  
 +            if (useInterpreter()) {
++                if (useTriangleHooks()) {
++                    disableInterpolation(state);
++                }
++
 +                runMicrocode(state, state->displayListAddress);
 +                *dl = nullptr;
 +                return;
@@ -435,17 +451,20 @@ index 737b013..bc78f51 100644
              nextChunkStack.push_back((*dl)->w0 & 0xFFFFFF);
 diff --git a/src/gbi/rt64_rsp_interpreter.cpp b/src/gbi/rt64_rsp_interpreter.cpp
 new file mode 100644
-index 0000000..4adf056
+index 0000000..71d5ced
 --- /dev/null
 +++ b/src/gbi/rt64_rsp_interpreter.cpp
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,626 @@
 +//
 +// RT64
 +//
 +
 +#include "rt64_rsp_interpreter.h"
 +
++#include <array>
++#include <cmath>
 +#include <cstring>
++#include <utility>
 +
 +namespace RT64 {
 +    namespace RSPVU {
@@ -464,7 +483,8 @@ index 0000000..4adf056
 +
 +            for (u16 index = 0; index < 512; index++) {
 +                u64 a = (index + 512) >> ((index % 2 == 1) ? 1 : 0);
-+                u64 b = 1 << 17;
++                // The largest b from 2^17 up where a * (b + 1)^2 < 2^44, starting near it.
++                u64 b = std::max<u64>(1 << 17, u64(std::sqrt(double(u64(1) << 44) / double(a))) - 2);
 +                while (a * (b + 1) * (b + 1) < (u64(1) << 44)) b++;
 +                rspInverseSquareRoots[index] = u16(b >> 1);
 +            }
@@ -477,27 +497,6 @@ index 0000000..4adf056
 +            (void)initialized;
 +        }
 +    };
-+
-+    // Calls a vector unit function with the instruction's element as its template argument.
-+#define RSP_ELEMENT_SWITCH(e, call) \
-+    switch (e) { \
-+    case 0: { constexpr uint8_t E = 0; call; break; } \
-+    case 1: { constexpr uint8_t E = 1; call; break; } \
-+    case 2: { constexpr uint8_t E = 2; call; break; } \
-+    case 3: { constexpr uint8_t E = 3; call; break; } \
-+    case 4: { constexpr uint8_t E = 4; call; break; } \
-+    case 5: { constexpr uint8_t E = 5; call; break; } \
-+    case 6: { constexpr uint8_t E = 6; call; break; } \
-+    case 7: { constexpr uint8_t E = 7; call; break; } \
-+    case 8: { constexpr uint8_t E = 8; call; break; } \
-+    case 9: { constexpr uint8_t E = 9; call; break; } \
-+    case 10: { constexpr uint8_t E = 10; call; break; } \
-+    case 11: { constexpr uint8_t E = 11; call; break; } \
-+    case 12: { constexpr uint8_t E = 12; call; break; } \
-+    case 13: { constexpr uint8_t E = 13; call; break; } \
-+    case 14: { constexpr uint8_t E = 14; call; break; } \
-+    default: { constexpr uint8_t E = 15; call; break; } \
-+    }
 +
 +    RSPInterpreter::RSPInterpreter() {
 +        RSPVU::initConstants();
@@ -512,6 +511,7 @@ index 0000000..4adf056
 +        dmaMemAddress = 0;
 +        dmaDramAddress = 0;
 +        dpcStart = dpcEnd = dpcCurrent = 0;
++        broke = false;
 +    }
 +
 +    void RSPInterpreter::setHook(uint32_t imemAddress, bool enabled) {
@@ -562,6 +562,33 @@ index 0000000..4adf056
 +        uint32_t memAddress = dmaMemAddress & 0xFF8;
 +        uint32_t dramAddress = dmaDramAddress & 0xFFFFF8;
 +        for (uint32_t row = 0; row < rowCount; row++) {
++            // Rows are 8-byte aligned on both sides, and both use the same word-swapped layout, so a row
++            // that doesn't wrap around DMEM and lies within RDRAM (or the output buffer) copies as it is.
++            uint8_t *dramRow = nullptr;
++            const uint32_t dramStart = dramAddress & 0xFFFFFF;
++            if (((dramStart + rowLength) <= 0x1000000) && ((memAddress & 0xFFF) + rowLength <= 0x1000)) {
++                if ((outputBuffer != nullptr) && (dramStart >= outputBufferAddress) && (dramStart + rowLength <= outputBufferAddress + outputBufferSize)) {
++                    dramRow = &outputBuffer[dramStart - outputBufferAddress];
++                }
++                else if (dramStart + rowLength <= rdramSize) {
++                    dramRow = &rdram[dramStart];
++                }
++            }
++
++            if (dramRow != nullptr) {
++                uint8_t *memRow = &mem[memAddress & 0xFFF];
++                if (write) {
++                    memcpy(dramRow, memRow, rowLength);
++                }
++                else {
++                    memcpy(memRow, dramRow, rowLength);
++                }
++
++                memAddress += rowLength;
++                dramAddress += rowLength + skip;
++                continue;
++            }
++
 +            for (uint32_t i = 0; i < rowLength; i++) {
 +                uint8_t &memByte = mem[((memAddress + i) & 0xFFF) ^ 3];
 +                uint8_t &dram = dramByte(dramAddress + i);
@@ -575,6 +602,15 @@ index 0000000..4adf056
 +
 +            memAddress += rowLength;
 +            dramAddress += rowLength + skip;
++        }
++
++        // Instructions overwritten in IMEM are decoded again.
++        if (dmaMemAddress & 0x1000) {
++            const uint32_t start = dmaMemAddress & 0xFF8;
++            const uint32_t total = rowLength * rowCount;
++            for (uint32_t i = 0; (i < total) && (i < 0x1000); i += 4) {
++                decoded[((start + i) & 0xFFF) >> 2].handler = nullptr;
++            }
 +        }
 +
 +        dmaMemAddress = (dmaMemAddress & 0x1000) | (memAddress & 0xFF8);
@@ -631,257 +667,426 @@ index 0000000..4adf056
 +        }
 +    }
 +
-+    void RSPInterpreter::executeVectorLoadStore(uint32_t instr, bool store) {
-+        const uint32_t base = gpr[(instr >> 21) & 0x1F];
-+        const uint32_t vt = (instr >> 16) & 0x1F;
-+        const uint32_t op = (instr >> 11) & 0x1F;
-+        const uint32_t e = (instr >> 7) & 0xF;
-+        const int8_t offset = int8_t(uint8_t(instr << 1)) >> 1;
-+        RSPVU::RSP::r128 &v = vu.vpu.r[vt];
-+        if (store) {
-+            switch (op) {
-+            case 0x00: RSP_ELEMENT_SWITCH(e, vu.SBV<E>(v, base, offset)); break;
-+            case 0x01: RSP_ELEMENT_SWITCH(e, vu.SSV<E>(v, base, offset)); break;
-+            case 0x02: RSP_ELEMENT_SWITCH(e, vu.SLV<E>(v, base, offset)); break;
-+            case 0x03: RSP_ELEMENT_SWITCH(e, vu.SDV<E>(v, base, offset)); break;
-+            case 0x04: RSP_ELEMENT_SWITCH(e, vu.SQV<E>(v, base, offset)); break;
-+            case 0x05: RSP_ELEMENT_SWITCH(e, vu.SRV<E>(v, base, offset)); break;
-+            case 0x06: RSP_ELEMENT_SWITCH(e, vu.SPV<E>(v, base, offset)); break;
-+            case 0x07: RSP_ELEMENT_SWITCH(e, vu.SUV<E>(v, base, offset)); break;
-+            case 0x08: RSP_ELEMENT_SWITCH(e, vu.SHV<E>(v, base, offset)); break;
-+            case 0x09: RSP_ELEMENT_SWITCH(e, vu.SFV<E>(v, base, offset)); break;
-+            case 0x0A: RSP_ELEMENT_SWITCH(e, vu.SWV<E>(v, base, offset)); break;
-+            case 0x0B: RSP_ELEMENT_SWITCH(e, vu.STV<E>(uint8_t(vt), base, offset)); break;
-+            default: break;
-+            }
-+        }
-+        else {
-+            switch (op) {
-+            case 0x00: RSP_ELEMENT_SWITCH(e, vu.LBV<E>(v, base, offset)); break;
-+            case 0x01: RSP_ELEMENT_SWITCH(e, vu.LSV<E>(v, base, offset)); break;
-+            case 0x02: RSP_ELEMENT_SWITCH(e, vu.LLV<E>(v, base, offset)); break;
-+            case 0x03: RSP_ELEMENT_SWITCH(e, vu.LDV<E>(v, base, offset)); break;
-+            case 0x04: RSP_ELEMENT_SWITCH(e, vu.LQV<E>(v, base, offset)); break;
-+            case 0x05: RSP_ELEMENT_SWITCH(e, vu.LRV<E>(v, base, offset)); break;
-+            case 0x06: RSP_ELEMENT_SWITCH(e, vu.LPV<E>(v, base, offset)); break;
-+            case 0x07: RSP_ELEMENT_SWITCH(e, vu.LUV<E>(v, base, offset)); break;
-+            case 0x08: RSP_ELEMENT_SWITCH(e, vu.LHV<E>(v, base, offset)); break;
-+            case 0x09: RSP_ELEMENT_SWITCH(e, vu.LFV<E>(v, base, offset)); break;
-+            case 0x0A: RSP_ELEMENT_SWITCH(e, vu.LWV<E>(v, base, offset)); break;
-+            case 0x0B: RSP_ELEMENT_SWITCH(e, vu.LTV<E>(uint8_t(vt), base, offset)); break;
-+            default: break;
-+            }
-+        }
++    // Instruction handlers. Decoded fields: a = rs (or the base register), b = rt,
++    // c = rd (or vd for vector operations, the shift amount for shifts), offset = the
++    // vector load/store offset, imm = the immediate, branch target or link address.
++
++    using Decoded = RSPInterpreter::Decoded;
++    using Handler = RSPInterpreter::Handler;
++
++    static inline uint8_t loadByte(const RSPInterpreter &rsp, uint32_t address) {
++        return rsp.dmem[(address & 0xFFF) ^ 3];
 +    }
 +
-+    void RSPInterpreter::executeCop2(uint32_t instr) {
-+        const uint32_t rt = (instr >> 16) & 0x1F;
-+        if ((instr & (1U << 25)) == 0) {
-+            const uint32_t rd = (instr >> 11) & 0x1F;
-+            const uint32_t e = (instr >> 7) & 0xF;
-+            RSPVU::RSP::r128 &vs = vu.vpu.r[rd];
-+            uint32_t value = gpr[rt];
-+            switch ((instr >> 21) & 0x1F) {
-+            case 0x00:
-+                RSP_ELEMENT_SWITCH(e, vu.MFC2<E>(value, vs));
-+                if (rt != 0) {
-+                    gpr[rt] = value;
-+                }
++    static inline void storeByte(RSPInterpreter &rsp, uint32_t address, uint8_t value) {
++        rsp.dmem[(address & 0xFFF) ^ 3] = value;
++    }
 +
-+                break;
-+            case 0x02:
-+                vu.CFC2(value, uint8_t(rd));
-+                if (rt != 0) {
-+                    gpr[rt] = value;
-+                }
++    static inline uint32_t loadWord(const RSPInterpreter &rsp, uint32_t address) {
++        address &= 0xFFF;
++        if ((address & 3) == 0) {
++            uint32_t value;
++            memcpy(&value, &rsp.dmem[address], sizeof(value));
++            return value;
++        }
 +
-+                break;
-+            case 0x04:
-+                RSP_ELEMENT_SWITCH(e, vu.MTC2<E>(value, vs));
-+                break;
-+            case 0x06:
-+                vu.CTC2(value, uint8_t(rd));
-+                break;
-+            default:
-+                break;
-+            }
++        return (uint32_t(loadByte(rsp, address)) << 24) | (uint32_t(loadByte(rsp, address + 1)) << 16) | (uint32_t(loadByte(rsp, address + 2)) << 8) | loadByte(rsp, address + 3);
++    }
 +
++    static inline uint32_t loadHalf(const RSPInterpreter &rsp, uint32_t address) {
++        address &= 0xFFF;
++        if ((address & 1) == 0) {
++            uint16_t value;
++            memcpy(&value, &rsp.dmem[address ^ 2], sizeof(value));
++            return value;
++        }
++
++        return (uint32_t(loadByte(rsp, address)) << 8) | loadByte(rsp, address + 1);
++    }
++
++    static inline void storeWord(RSPInterpreter &rsp, uint32_t address, uint32_t value) {
++        address &= 0xFFF;
++        if ((address & 3) == 0) {
++            memcpy(&rsp.dmem[address], &value, sizeof(value));
 +            return;
 +        }
 +
-+        const uint32_t e = (instr >> 21) & 0xF;
-+        const uint32_t vsIndex = (instr >> 11) & 0x1F;
-+        RSPVU::RSP::r128 &vd = vu.vpu.r[(instr >> 6) & 0x1F];
-+        RSPVU::RSP::r128 &vs = vu.vpu.r[vsIndex];
-+        RSPVU::RSP::r128 &vt = vu.vpu.r[rt];
-+        const uint8_t de = uint8_t(vsIndex & 7);
-+        switch (instr & 0x3F) {
-+        case 0x00: RSP_ELEMENT_SWITCH(e, vu.VMULF<E>(vd, vs, vt)); break;
-+        case 0x01: RSP_ELEMENT_SWITCH(e, vu.VMULU<E>(vd, vs, vt)); break;
-+        case 0x02: RSP_ELEMENT_SWITCH(e, vu.VRNDP<E>(vd, uint8_t(vsIndex), vt)); break;
-+        case 0x03: RSP_ELEMENT_SWITCH(e, vu.VMULQ<E>(vd, vs, vt)); break;
-+        case 0x04: RSP_ELEMENT_SWITCH(e, vu.VMUDL<E>(vd, vs, vt)); break;
-+        case 0x05: RSP_ELEMENT_SWITCH(e, vu.VMUDM<E>(vd, vs, vt)); break;
-+        case 0x06: RSP_ELEMENT_SWITCH(e, vu.VMUDN<E>(vd, vs, vt)); break;
-+        case 0x07: RSP_ELEMENT_SWITCH(e, vu.VMUDH<E>(vd, vs, vt)); break;
-+        case 0x08: RSP_ELEMENT_SWITCH(e, vu.VMACF<E>(vd, vs, vt)); break;
-+        case 0x09: RSP_ELEMENT_SWITCH(e, vu.VMACU<E>(vd, vs, vt)); break;
-+        case 0x0A: RSP_ELEMENT_SWITCH(e, vu.VRNDN<E>(vd, uint8_t(vsIndex), vt)); break;
-+        case 0x0B: vu.VMACQ(vd); break;
-+        case 0x0C: RSP_ELEMENT_SWITCH(e, vu.VMADL<E>(vd, vs, vt)); break;
-+        case 0x0D: RSP_ELEMENT_SWITCH(e, vu.VMADM<E>(vd, vs, vt)); break;
-+        case 0x0E: RSP_ELEMENT_SWITCH(e, vu.VMADN<E>(vd, vs, vt)); break;
-+        case 0x0F: RSP_ELEMENT_SWITCH(e, vu.VMADH<E>(vd, vs, vt)); break;
-+        case 0x10: RSP_ELEMENT_SWITCH(e, vu.VADD<E>(vd, vs, vt)); break;
-+        case 0x11: RSP_ELEMENT_SWITCH(e, vu.VSUB<E>(vd, vs, vt)); break;
-+        case 0x13: RSP_ELEMENT_SWITCH(e, vu.VABS<E>(vd, vs, vt)); break;
-+        case 0x14: RSP_ELEMENT_SWITCH(e, vu.VADDC<E>(vd, vs, vt)); break;
-+        case 0x15: RSP_ELEMENT_SWITCH(e, vu.VSUBC<E>(vd, vs, vt)); break;
-+        case 0x1D: RSP_ELEMENT_SWITCH(e, vu.VSAR<E>(vd, vs)); break;
-+        case 0x20: RSP_ELEMENT_SWITCH(e, vu.VLT<E>(vd, vs, vt)); break;
-+        case 0x21: RSP_ELEMENT_SWITCH(e, vu.VEQ<E>(vd, vs, vt)); break;
-+        case 0x22: RSP_ELEMENT_SWITCH(e, vu.VNE<E>(vd, vs, vt)); break;
-+        case 0x23: RSP_ELEMENT_SWITCH(e, vu.VGE<E>(vd, vs, vt)); break;
-+        case 0x24: RSP_ELEMENT_SWITCH(e, vu.VCL<E>(vd, vs, vt)); break;
-+        case 0x25: RSP_ELEMENT_SWITCH(e, vu.VCH<E>(vd, vs, vt)); break;
-+        case 0x26: RSP_ELEMENT_SWITCH(e, vu.VCR<E>(vd, vs, vt)); break;
-+        case 0x27: RSP_ELEMENT_SWITCH(e, vu.VMRG<E>(vd, vs, vt)); break;
-+        case 0x28: RSP_ELEMENT_SWITCH(e, vu.VAND<E>(vd, vs, vt)); break;
-+        case 0x29: RSP_ELEMENT_SWITCH(e, vu.VNAND<E>(vd, vs, vt)); break;
-+        case 0x2A: RSP_ELEMENT_SWITCH(e, vu.VOR<E>(vd, vs, vt)); break;
-+        case 0x2B: RSP_ELEMENT_SWITCH(e, vu.VNOR<E>(vd, vs, vt)); break;
-+        case 0x2C: RSP_ELEMENT_SWITCH(e, vu.VXOR<E>(vd, vs, vt)); break;
-+        case 0x2D: RSP_ELEMENT_SWITCH(e, vu.VNXOR<E>(vd, vs, vt)); break;
-+        case 0x30: RSP_ELEMENT_SWITCH(e, vu.VRCP<E>(vd, de, vt)); break;
-+        case 0x31: RSP_ELEMENT_SWITCH(e, vu.VRCPL<E>(vd, de, vt)); break;
-+        case 0x32: RSP_ELEMENT_SWITCH(e, vu.VRCPH<E>(vd, de, vt)); break;
-+        case 0x33: RSP_ELEMENT_SWITCH(e, vu.VMOV<E>(vd, de, vt)); break;
-+        case 0x34: RSP_ELEMENT_SWITCH(e, vu.VRSQ<E>(vd, de, vt)); break;
-+        case 0x35: RSP_ELEMENT_SWITCH(e, vu.VRSQL<E>(vd, de, vt)); break;
-+        case 0x36: RSP_ELEMENT_SWITCH(e, vu.VRSQH<E>(vd, de, vt)); break;
-+        case 0x37:
-+        case 0x3F:
++        storeByte(rsp, address, uint8_t(value >> 24));
++        storeByte(rsp, address + 1, uint8_t(value >> 16));
++        storeByte(rsp, address + 2, uint8_t(value >> 8));
++        storeByte(rsp, address + 3, uint8_t(value));
++    }
++
++    static inline void storeHalf(RSPInterpreter &rsp, uint32_t address, uint32_t value) {
++        address &= 0xFFF;
++        if ((address & 1) == 0) {
++            const uint16_t half = uint16_t(value);
++            memcpy(&rsp.dmem[address ^ 2], &half, sizeof(half));
++            return;
++        }
++
++        storeByte(rsp, address, uint8_t(value >> 8));
++        storeByte(rsp, address + 1, uint8_t(value));
++    }
++
++#define RSP_HANDLER(name) static void name(RSPInterpreter &rsp, const Decoded &d)
++#define RS rsp.gpr[d.a]
++#define RT rsp.gpr[d.b]
++#define RD rsp.gpr[d.c]
++
++    RSP_HANDLER(opNop) { (void)rsp; (void)d; }
++    RSP_HANDLER(opSll) { RD = RT << d.offset; }
++    RSP_HANDLER(opSrl) { RD = RT >> d.offset; }
++    RSP_HANDLER(opSra) { RD = uint32_t(int32_t(RT) >> d.offset); }
++    RSP_HANDLER(opSllv) { RD = RT << (RS & 31); }
++    RSP_HANDLER(opSrlv) { RD = RT >> (RS & 31); }
++    RSP_HANDLER(opSrav) { RD = uint32_t(int32_t(RT) >> (RS & 31)); }
++    RSP_HANDLER(opJr) { rsp.nextPc = RS & 0xFFC; }
++    RSP_HANDLER(opJalr) { const uint32_t target = RS & 0xFFC; RD = d.imm; rsp.nextPc = target; }
++    RSP_HANDLER(opBreak) { (void)d; rsp.broke = true; }
++    RSP_HANDLER(opAdd) { RD = RS + RT; }
++    RSP_HANDLER(opSub) { RD = RS - RT; }
++    RSP_HANDLER(opAnd) { RD = RS & RT; }
++    RSP_HANDLER(opOr) { RD = RS | RT; }
++    RSP_HANDLER(opXor) { RD = RS ^ RT; }
++    RSP_HANDLER(opNor) { RD = ~(RS | RT); }
++    RSP_HANDLER(opSlt) { RD = (int32_t(RS) < int32_t(RT)) ? 1 : 0; }
++    RSP_HANDLER(opSltu) { RD = (RS < RT) ? 1 : 0; }
++    RSP_HANDLER(opBltz) { if (int32_t(RS) < 0) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opBgez) { if (int32_t(RS) >= 0) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opBltzal) { const bool taken = int32_t(RS) < 0; rsp.gpr[31] = d.imm >> 16; if (taken) rsp.nextPc = d.imm & 0xFFC; }
++    RSP_HANDLER(opBgezal) { const bool taken = int32_t(RS) >= 0; rsp.gpr[31] = d.imm >> 16; if (taken) rsp.nextPc = d.imm & 0xFFC; }
++    RSP_HANDLER(opJ) { rsp.nextPc = d.imm; }
++    RSP_HANDLER(opJal) { rsp.nextPc = d.imm & 0xFFC; rsp.gpr[31] = d.imm >> 16; }
++    RSP_HANDLER(opBeq) { if (RS == RT) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opBne) { if (RS != RT) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opBlez) { if (int32_t(RS) <= 0) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opBgtz) { if (int32_t(RS) > 0) rsp.nextPc = d.imm; }
++    RSP_HANDLER(opAddi) { RT = RS + d.imm; }
++    RSP_HANDLER(opSlti) { RT = (int32_t(RS) < int32_t(d.imm)) ? 1 : 0; }
++    RSP_HANDLER(opSltiu) { RT = (RS < d.imm) ? 1 : 0; }
++    RSP_HANDLER(opAndi) { RT = RS & d.imm; }
++    RSP_HANDLER(opOri) { RT = RS | d.imm; }
++    RSP_HANDLER(opXori) { RT = RS ^ d.imm; }
++    RSP_HANDLER(opLui) { RT = d.imm; }
++    RSP_HANDLER(opMfc0) { RT = rsp.readCop0(d.c); }
++    RSP_HANDLER(opMtc0) { rsp.writeCop0(d.c, RT); }
++    RSP_HANDLER(opLb) { RT = uint32_t(int8_t(loadByte(rsp, RS + d.imm))); }
++    RSP_HANDLER(opLh) { RT = uint32_t(int16_t(loadHalf(rsp, RS + d.imm))); }
++    RSP_HANDLER(opLw) { RT = loadWord(rsp, RS + d.imm); }
++    RSP_HANDLER(opLbu) { RT = loadByte(rsp, RS + d.imm); }
++    RSP_HANDLER(opLhu) { RT = loadHalf(rsp, RS + d.imm); }
++    RSP_HANDLER(opSb) { storeByte(rsp, RS + d.imm, uint8_t(RT)); }
++    RSP_HANDLER(opSh) { storeHalf(rsp, RS + d.imm, RT); }
++    RSP_HANDLER(opSw) { storeWord(rsp, RS + d.imm, RT); }
++    RSP_HANDLER(opCfc2) { uint32_t value = RT; rsp.vu.CFC2(value, d.c); RT = value; }
++    RSP_HANDLER(opCtc2) { uint32_t value = RT; rsp.vu.CTC2(value, d.c); }
++
++    template<uint8_t E>
++    static void opMfc2(RSPInterpreter &rsp, const Decoded &d) {
++        uint32_t value = RT;
++        rsp.vu.template MFC2<E>(value, rsp.vu.vpu.r[d.c]);
++        RT = value;
++    }
++
++    template<uint8_t E>
++    static void opMtc2(RSPInterpreter &rsp, const Decoded &d) {
++        uint32_t value = RT;
++        rsp.vu.template MTC2<E>(value, rsp.vu.vpu.r[d.c]);
++    }
++
++#undef RS
++#undef RT
++#undef RD
++
++    // Vector operations: one handler per function and element. a = vs, b = vt, c = vd.
++    template<uint32_t F, uint8_t E>
++    static void opVector(RSPInterpreter &rsp, const Decoded &d) {
++        RSPVU::RSP &vu = rsp.vu;
++        RSPVU::RSP::r128 &vd = vu.vpu.r[d.c];
++        RSPVU::RSP::r128 &vs = vu.vpu.r[d.a];
++        RSPVU::RSP::r128 &vt = vu.vpu.r[d.b];
++        const uint8_t de = d.a & 7;
++        (void)vs;
++        (void)de;
++        if constexpr (F == 0x00) vu.template VMULF<E>(vd, vs, vt);
++        else if constexpr (F == 0x01) vu.template VMULU<E>(vd, vs, vt);
++        else if constexpr (F == 0x02) vu.template VRNDP<E>(vd, d.a, vt);
++        else if constexpr (F == 0x03) vu.template VMULQ<E>(vd, vs, vt);
++        else if constexpr (F == 0x04) vu.template VMUDL<E>(vd, vs, vt);
++        else if constexpr (F == 0x05) vu.template VMUDM<E>(vd, vs, vt);
++        else if constexpr (F == 0x06) vu.template VMUDN<E>(vd, vs, vt);
++        else if constexpr (F == 0x07) vu.template VMUDH<E>(vd, vs, vt);
++        else if constexpr (F == 0x08) vu.template VMACF<E>(vd, vs, vt);
++        else if constexpr (F == 0x09) vu.template VMACU<E>(vd, vs, vt);
++        else if constexpr (F == 0x0A) vu.template VRNDN<E>(vd, d.a, vt);
++        else if constexpr (F == 0x0B) vu.VMACQ(vd);
++        else if constexpr (F == 0x0C) vu.template VMADL<E>(vd, vs, vt);
++        else if constexpr (F == 0x0D) vu.template VMADM<E>(vd, vs, vt);
++        else if constexpr (F == 0x0E) vu.template VMADN<E>(vd, vs, vt);
++        else if constexpr (F == 0x0F) vu.template VMADH<E>(vd, vs, vt);
++        else if constexpr (F == 0x10) vu.template VADD<E>(vd, vs, vt);
++        else if constexpr (F == 0x11) vu.template VSUB<E>(vd, vs, vt);
++        else if constexpr (F == 0x13) vu.template VABS<E>(vd, vs, vt);
++        else if constexpr (F == 0x14) vu.template VADDC<E>(vd, vs, vt);
++        else if constexpr (F == 0x15) vu.template VSUBC<E>(vd, vs, vt);
++        else if constexpr (F == 0x1D) vu.template VSAR<E>(vd, vs);
++        else if constexpr (F == 0x20) vu.template VLT<E>(vd, vs, vt);
++        else if constexpr (F == 0x21) vu.template VEQ<E>(vd, vs, vt);
++        else if constexpr (F == 0x22) vu.template VNE<E>(vd, vs, vt);
++        else if constexpr (F == 0x23) vu.template VGE<E>(vd, vs, vt);
++        else if constexpr (F == 0x24) vu.template VCL<E>(vd, vs, vt);
++        else if constexpr (F == 0x25) vu.template VCH<E>(vd, vs, vt);
++        else if constexpr (F == 0x26) vu.template VCR<E>(vd, vs, vt);
++        else if constexpr (F == 0x27) vu.template VMRG<E>(vd, vs, vt);
++        else if constexpr (F == 0x28) vu.template VAND<E>(vd, vs, vt);
++        else if constexpr (F == 0x29) vu.template VNAND<E>(vd, vs, vt);
++        else if constexpr (F == 0x2A) vu.template VOR<E>(vd, vs, vt);
++        else if constexpr (F == 0x2B) vu.template VNOR<E>(vd, vs, vt);
++        else if constexpr (F == 0x2C) vu.template VXOR<E>(vd, vs, vt);
++        else if constexpr (F == 0x2D) vu.template VNXOR<E>(vd, vs, vt);
++        else if constexpr (F == 0x30) vu.template VRCP<E>(vd, de, vt);
++        else if constexpr (F == 0x31) vu.template VRCPL<E>(vd, de, vt);
++        else if constexpr (F == 0x32) vu.template VRCPH<E>(vd, de, vt);
++        else if constexpr (F == 0x33) vu.template VMOV<E>(vd, de, vt);
++        else if constexpr (F == 0x34) vu.template VRSQ<E>(vd, de, vt);
++        else if constexpr (F == 0x35) vu.template VRSQL<E>(vd, de, vt);
++        else if constexpr (F == 0x36) vu.template VRSQH<E>(vd, de, vt);
++        else if constexpr ((F == 0x37) || (F == 0x3F)) { (void)vd; (void)vt; }
++        // The unused encodings act like VZERO: the accumulator's low lanes get vs + vt and vd is cleared.
++        else vu.template VZERO<E>(vd, vs, vt);
++    }
++
++    // Vector loads and stores: a = the base register, b = vt, offset = the offset in units of the access size.
++    template<uint32_t Op, bool Store, uint8_t E>
++    static void opVectorMemory(RSPInterpreter &rsp, const Decoded &d) {
++        RSPVU::RSP &vu = rsp.vu;
++        RSPVU::RSP::r128 &v = vu.vpu.r[d.b];
++        const uint32_t base = rsp.gpr[d.a];
++        const int8_t offset = d.offset;
++        (void)v;
++        (void)base;
++        (void)offset;
++        if constexpr (Store) {
++            if constexpr (Op == 0x00) vu.template SBV<E>(v, base, offset);
++            else if constexpr (Op == 0x01) vu.template SSV<E>(v, base, offset);
++            else if constexpr (Op == 0x02) vu.template SLV<E>(v, base, offset);
++            else if constexpr (Op == 0x03) vu.template SDV<E>(v, base, offset);
++            else if constexpr (Op == 0x04) vu.template SQV<E>(v, base, offset);
++            else if constexpr (Op == 0x05) vu.template SRV<E>(v, base, offset);
++            else if constexpr (Op == 0x06) vu.template SPV<E>(v, base, offset);
++            else if constexpr (Op == 0x07) vu.template SUV<E>(v, base, offset);
++            else if constexpr (Op == 0x08) vu.template SHV<E>(v, base, offset);
++            else if constexpr (Op == 0x09) vu.template SFV<E>(v, base, offset);
++            else if constexpr (Op == 0x0A) vu.template SWV<E>(v, base, offset);
++            else if constexpr (Op == 0x0B) vu.template STV<E>(d.b, base, offset);
++        }
++        else {
++            if constexpr (Op == 0x00) vu.template LBV<E>(v, base, offset);
++            else if constexpr (Op == 0x01) vu.template LSV<E>(v, base, offset);
++            else if constexpr (Op == 0x02) vu.template LLV<E>(v, base, offset);
++            else if constexpr (Op == 0x03) vu.template LDV<E>(v, base, offset);
++            else if constexpr (Op == 0x04) vu.template LQV<E>(v, base, offset);
++            else if constexpr (Op == 0x05) vu.template LRV<E>(v, base, offset);
++            else if constexpr (Op == 0x06) vu.template LPV<E>(v, base, offset);
++            else if constexpr (Op == 0x07) vu.template LUV<E>(v, base, offset);
++            else if constexpr (Op == 0x08) vu.template LHV<E>(v, base, offset);
++            else if constexpr (Op == 0x09) vu.template LFV<E>(v, base, offset);
++            else if constexpr (Op == 0x0A) vu.template LWV<E>(v, base, offset);
++            else if constexpr (Op == 0x0B) vu.template LTV<E>(d.b, base, offset);
++        }
++    }
++
++    // Tables of the handlers by function (or operation) and element.
++    template<uint32_t F, size_t... E>
++    static constexpr std::array<Handler, 16> vectorRow(std::index_sequence<E...>) {
++        return { &opVector<F, uint8_t(E)>... };
++    }
++
++    template<size_t... F>
++    static constexpr std::array<std::array<Handler, 16>, 64> vectorTable(std::index_sequence<F...>) {
++        return { vectorRow<uint32_t(F)>(std::make_index_sequence<16>())... };
++    }
++
++    template<uint32_t Op, bool Store, size_t... E>
++    static constexpr std::array<Handler, 16> memoryRow(std::index_sequence<E...>) {
++        return { &opVectorMemory<Op, Store, uint8_t(E)>... };
++    }
++
++    template<bool Store, size_t... Op>
++    static constexpr std::array<std::array<Handler, 16>, 12> memoryTable(std::index_sequence<Op...>) {
++        return { memoryRow<uint32_t(Op), Store>(std::make_index_sequence<16>())... };
++    }
++
++    template<size_t... E>
++    static constexpr std::array<Handler, 16> mfc2Row(std::index_sequence<E...>) {
++        return { &opMfc2<uint8_t(E)>... };
++    }
++
++    template<size_t... E>
++    static constexpr std::array<Handler, 16> mtc2Row(std::index_sequence<E...>) {
++        return { &opMtc2<uint8_t(E)>... };
++    }
++
++    static const std::array<std::array<Handler, 16>, 64> VectorHandlers = vectorTable(std::make_index_sequence<64>());
++    static const std::array<std::array<Handler, 16>, 12> LoadHandlers = memoryTable<false>(std::make_index_sequence<12>());
++    static const std::array<std::array<Handler, 16>, 12> StoreHandlers = memoryTable<true>(std::make_index_sequence<12>());
++    static const std::array<Handler, 16> Mfc2Handlers = mfc2Row(std::make_index_sequence<16>());
++    static const std::array<Handler, 16> Mtc2Handlers = mtc2Row(std::make_index_sequence<16>());
++
++    void RSPInterpreter::decode(uint32_t index) {
++        const uint32_t instr = imemWord(index << 2);
++        const uint32_t address = index << 2;
++        const uint32_t rs = (instr >> 21) & 0x1F;
++        const uint32_t rt = (instr >> 16) & 0x1F;
++        const uint32_t rd = (instr >> 11) & 0x1F;
++        const uint32_t sa = (instr >> 6) & 0x1F;
++        const uint32_t immU = instr & 0xFFFF;
++        const uint32_t immS = uint32_t(int32_t(int16_t(immU)));
++        const uint32_t branchTarget = (address + 4 + (immS << 2)) & 0xFFC;
++        const uint32_t link = (address + 8) & 0xFFC;
++        Decoded &d = decoded[index];
++        d = {};
++        d.a = uint8_t(rs);
++        d.b = uint8_t(rt);
++        d.c = uint8_t(rd);
++        d.handler = &opNop;
++
++        // Writes to $zero do nothing (the run loop also clears it after each instruction).
++        switch (instr >> 26) {
++        case 0x00:
++            d.offset = int8_t(sa);
++            switch (instr & 0x3F) {
++            case 0x00: d.handler = &opSll; break;
++            case 0x02: d.handler = &opSrl; break;
++            case 0x03: d.handler = &opSra; break;
++            case 0x04: d.handler = &opSllv; break;
++            case 0x06: d.handler = &opSrlv; break;
++            case 0x07: d.handler = &opSrav; break;
++            case 0x08: d.handler = &opJr; break;
++            case 0x09: d.handler = &opJalr; d.imm = link; break;
++            case 0x0D: d.handler = &opBreak; break;
++            case 0x20: case 0x21: d.handler = &opAdd; break;
++            case 0x22: case 0x23: d.handler = &opSub; break;
++            case 0x24: d.handler = &opAnd; break;
++            case 0x25: d.handler = &opOr; break;
++            case 0x26: d.handler = &opXor; break;
++            case 0x27: d.handler = &opNor; break;
++            case 0x2A: d.handler = &opSlt; break;
++            case 0x2B: d.handler = &opSltu; break;
++            default: break;
++            }
++
 +            break;
++        case 0x01:
++            switch (rt) {
++            case 0x00: d.handler = &opBltz; d.imm = branchTarget; break;
++            case 0x01: d.handler = &opBgez; d.imm = branchTarget; break;
++            case 0x10: d.handler = &opBltzal; d.imm = branchTarget | (link << 16); break;
++            case 0x11: d.handler = &opBgezal; d.imm = branchTarget | (link << 16); break;
++            default: break;
++            }
++
++            break;
++        case 0x02: d.handler = &opJ; d.imm = (instr << 2) & 0xFFC; break;
++        case 0x03: d.handler = &opJal; d.imm = ((instr << 2) & 0xFFC) | (link << 16); break;
++        case 0x04: d.handler = &opBeq; d.imm = branchTarget; break;
++        case 0x05: d.handler = &opBne; d.imm = branchTarget; break;
++        case 0x06: d.handler = &opBlez; d.imm = branchTarget; break;
++        case 0x07: d.handler = &opBgtz; d.imm = branchTarget; break;
++        case 0x08: case 0x09: d.handler = &opAddi; d.imm = immS; break;
++        case 0x0A: d.handler = &opSlti; d.imm = immS; break;
++        case 0x0B: d.handler = &opSltiu; d.imm = immS; break;
++        case 0x0C: d.handler = &opAndi; d.imm = immU; break;
++        case 0x0D: d.handler = &opOri; d.imm = immU; break;
++        case 0x0E: d.handler = &opXori; d.imm = immU; break;
++        case 0x0F: d.handler = &opLui; d.imm = immU << 16; break;
++        case 0x10:
++            if (rs == 0x00) d.handler = &opMfc0;
++            else if (rs == 0x04) d.handler = &opMtc0;
++            break;
++        case 0x12:
++            if ((instr & (1U << 25)) != 0) {
++                // a = vs, b = vt, c = vd.
++                d.a = uint8_t(rd);
++                d.b = uint8_t(rt);
++                d.c = uint8_t(sa);
++                d.handler = VectorHandlers[instr & 0x3F][(instr >> 21) & 0xF];
++            }
++            else {
++                const uint32_t e = (instr >> 7) & 0xF;
++                switch (rs) {
++                case 0x00: d.handler = Mfc2Handlers[e]; break;
++                case 0x02: d.handler = &opCfc2; break;
++                case 0x04: d.handler = Mtc2Handlers[e]; break;
++                case 0x06: d.handler = &opCtc2; break;
++                default: break;
++                }
++            }
++
++            break;
++        case 0x20: d.handler = &opLb; d.imm = immS; break;
++        case 0x21: d.handler = &opLh; d.imm = immS; break;
++        case 0x23: case 0x27: d.handler = &opLw; d.imm = immS; break;
++        case 0x24: d.handler = &opLbu; d.imm = immS; break;
++        case 0x25: d.handler = &opLhu; d.imm = immS; break;
++        case 0x28: d.handler = &opSb; d.imm = immS; break;
++        case 0x29: d.handler = &opSh; d.imm = immS; break;
++        case 0x2B: d.handler = &opSw; d.imm = immS; break;
++        case 0x32:
++        case 0x3A: {
++            const uint32_t op = rd;
++            if (op < 12) {
++                d.offset = int8_t(uint8_t(instr << 1)) >> 1;
++                const uint32_t e = (instr >> 7) & 0xF;
++                d.handler = ((instr >> 26) == 0x3A) ? StoreHandlers[op][e] : LoadHandlers[op][e];
++            }
++
++            break;
++        }
 +        default:
-+            // The unused encodings act like VZERO: the accumulator's low lanes get vs + vt and vd is cleared.
-+            RSP_ELEMENT_SWITCH(e, vu.VZERO<E>(vd, vs, vt));
 +            break;
 +        }
 +    }
 +
 +    RSPInterpreter::Result RSPInterpreter::run(uint64_t maxInstructions) {
 +        RSPVU::dmem = dmem;
-+        auto loadByte = [this](uint32_t address) -> uint8_t { return dmem[(address & 0xFFF) ^ 3]; };
-+        auto storeByte = [this](uint32_t address, uint8_t value) { dmem[(address & 0xFFF) ^ 3] = value; };
++        broke = false;
++        for (Decoded &d : decoded) {
++            d.handler = nullptr;
++        }
++
 +        for (uint64_t count = 0; count < maxInstructions; count++) {
-+            if (hooks[pc >> 2] && (hook != nullptr) && hook(this, hookUserData)) {
++            const uint32_t index = pc >> 2;
++            if (hooks[index] && (hook != nullptr) && hook(this, hookUserData)) {
 +                continue;
 +            }
 +
-+            const uint32_t instr = imemWord(pc);
-+            const uint32_t current = pc;
-+            pc = nextPc;
-+            nextPc = (nextPc + 4) & 0xFFC;
-+
-+            const uint32_t rs = (instr >> 21) & 0x1F;
-+            const uint32_t rt = (instr >> 16) & 0x1F;
-+            const uint32_t rd = (instr >> 11) & 0x1F;
-+            const uint32_t sa = (instr >> 6) & 0x1F;
-+            const uint32_t immU = instr & 0xFFFF;
-+            const int32_t imm = int16_t(immU);
-+            const uint32_t s = gpr[rs];
-+            const uint32_t t = gpr[rt];
-+            const uint32_t branchTarget = (current + 4 + (uint32_t(imm) << 2)) & 0xFFC;
-+            const uint32_t address = s + uint32_t(imm);
-+            uint32_t result = 0;
-+            uint32_t dest = 0;
-+            switch (instr >> 26) {
-+            case 0x00:
-+                dest = rd;
-+                switch (instr & 0x3F) {
-+                case 0x00: result = t << sa; break;
-+                case 0x02: result = t >> sa; break;
-+                case 0x03: result = uint32_t(int32_t(t) >> sa); break;
-+                case 0x04: result = t << (s & 31); break;
-+                case 0x06: result = t >> (s & 31); break;
-+                case 0x07: result = uint32_t(int32_t(t) >> (s & 31)); break;
-+                case 0x08: nextPc = s & 0xFFC; dest = 0; break;
-+                case 0x09: nextPc = s & 0xFFC; result = (current + 8) & 0xFFC; break;
-+                case 0x0D: return Result::Broke;
-+                case 0x20: case 0x21: result = s + t; break;
-+                case 0x22: case 0x23: result = s - t; break;
-+                case 0x24: result = s & t; break;
-+                case 0x25: result = s | t; break;
-+                case 0x26: result = s ^ t; break;
-+                case 0x27: result = ~(s | t); break;
-+                case 0x2A: result = (int32_t(s) < int32_t(t)) ? 1 : 0; break;
-+                case 0x2B: result = (s < t) ? 1 : 0; break;
-+                default: dest = 0; break;
-+                }
-+
-+                break;
-+            case 0x01:
-+                switch (rt) {
-+                case 0x00: if (int32_t(s) < 0) nextPc = branchTarget; break;
-+                case 0x01: if (int32_t(s) >= 0) nextPc = branchTarget; break;
-+                case 0x10: if (int32_t(s) < 0) nextPc = branchTarget; gpr[31] = (current + 8) & 0xFFC; break;
-+                case 0x11: if (int32_t(s) >= 0) nextPc = branchTarget; gpr[31] = (current + 8) & 0xFFC; break;
-+                default: break;
-+                }
-+
-+                break;
-+            case 0x02: nextPc = (instr << 2) & 0xFFC; break;
-+            case 0x03: nextPc = (instr << 2) & 0xFFC; gpr[31] = (current + 8) & 0xFFC; break;
-+            case 0x04: if (s == t) nextPc = branchTarget; break;
-+            case 0x05: if (s != t) nextPc = branchTarget; break;
-+            case 0x06: if (int32_t(s) <= 0) nextPc = branchTarget; break;
-+            case 0x07: if (int32_t(s) > 0) nextPc = branchTarget; break;
-+            case 0x08: case 0x09: dest = rt; result = s + uint32_t(imm); break;
-+            case 0x0A: dest = rt; result = (int32_t(s) < imm) ? 1 : 0; break;
-+            case 0x0B: dest = rt; result = (s < uint32_t(imm)) ? 1 : 0; break;
-+            case 0x0C: dest = rt; result = s & immU; break;
-+            case 0x0D: dest = rt; result = s | immU; break;
-+            case 0x0E: dest = rt; result = s ^ immU; break;
-+            case 0x0F: dest = rt; result = immU << 16; break;
-+            case 0x10:
-+                if ((rs & 0x1F) == 0x00) { dest = rt; result = readCop0(rd); }
-+                else if ((rs & 0x1F) == 0x04) { writeCop0(rd, t); }
-+                break;
-+            case 0x12: executeCop2(instr); break;
-+            case 0x20: dest = rt; result = uint32_t(int8_t(loadByte(address))); break;
-+            case 0x21: dest = rt; result = uint32_t(int16_t((loadByte(address) << 8) | loadByte(address + 1))); break;
-+            case 0x23: dest = rt; result = (loadByte(address) << 24) | (loadByte(address + 1) << 16) | (loadByte(address + 2) << 8) | loadByte(address + 3); break;
-+            case 0x24: dest = rt; result = loadByte(address); break;
-+            case 0x25: dest = rt; result = (loadByte(address) << 8) | loadByte(address + 1); break;
-+            case 0x27: dest = rt; result = (loadByte(address) << 24) | (loadByte(address + 1) << 16) | (loadByte(address + 2) << 8) | loadByte(address + 3); break;
-+            case 0x28: storeByte(address, uint8_t(t)); break;
-+            case 0x29: storeByte(address, uint8_t(t >> 8)); storeByte(address + 1, uint8_t(t)); break;
-+            case 0x2B:
-+                storeByte(address, uint8_t(t >> 24));
-+                storeByte(address + 1, uint8_t(t >> 16));
-+                storeByte(address + 2, uint8_t(t >> 8));
-+                storeByte(address + 3, uint8_t(t));
-+                break;
-+            case 0x32: executeVectorLoadStore(instr, false); break;
-+            case 0x3A: executeVectorLoadStore(instr, true); break;
-+            default: break;
++            if (decoded[index].handler == nullptr) {
++                decode(index);
 +            }
 +
-+            if (dest != 0) {
-+                gpr[dest] = result;
++            const Decoded &d = decoded[index];
++            pc = nextPc;
++            nextPc = (nextPc + 4) & 0xFFC;
++            d.handler(*this, d);
++            gpr[0] = 0;
++            if (broke) {
++                return Result::Broke;
 +            }
 +        }
 +
 +        return Result::Timeout;
 +    }
-+#undef RSP_ELEMENT_SWITCH
++
++#undef RSP_HANDLER
 +};
 diff --git a/src/gbi/rt64_rsp_interpreter.h b/src/gbi/rt64_rsp_interpreter.h
 new file mode 100644
-index 0000000..e3cc03b
+index 0000000..1c9b96b
 --- /dev/null
 +++ b/src/gbi/rt64_rsp_interpreter.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,98 @@
 +//
 +// RT64
 +//
@@ -900,11 +1105,28 @@ index 0000000..e3cc03b
 +    // DMEM and IMEM are kept in RDRAM's 32-bit word-swapped layout (byte N at N ^ 3),
 +    // and so is the RDRAM it reads. The RDP is treated as always caught up: each write
 +    // to DPC_END hands the commands since the last one to rdpCommands().
++    //
++    // IMEM is decoded into handlers as the instructions are first run, and decoded
++    // again where a DMA overwrites it (the microcode's overlays). Whoever writes IMEM
++    // directly before a run doesn't need to say so: each run starts by forgetting the
++    // decoded instructions.
 +    struct RSPInterpreter {
 +        enum class Result {
 +            Broke,
 +            Halted,
 +            Timeout
++        };
++
++        struct Decoded;
++        typedef void (*Handler)(RSPInterpreter &rsp, const Decoded &d);
++
++        struct Decoded {
++            Handler handler;
++            uint8_t a;
++            uint8_t b;
++            uint8_t c;
++            int8_t offset;
++            uint32_t imm;
 +        };
 +
 +        RSPVU::RSP vu;
@@ -943,6 +1165,12 @@ index 0000000..e3cc03b
 +        void setDMEMWord(uint32_t address, uint32_t value);
 +        uint32_t imemWord(uint32_t address) const;
 +
++        // Used by the instruction handlers.
++        uint32_t branchFrom = 0;
++        bool broke = false;
++        uint32_t readCop0(uint32_t index);
++        void writeCop0(uint32_t index, uint32_t value);
++
 +    private:
 +        uint32_t dmaMemAddress = 0;
 +        uint32_t dmaDramAddress = 0;
@@ -951,12 +1179,10 @@ index 0000000..e3cc03b
 +        uint32_t dpcCurrent = 0;
 +        bool hooks[0x400] = {};
 +        uint8_t dummyByte = 0;
++        Decoded decoded[0x400] = {};
 +
 +        void dma(uint32_t length, bool write);
-+        uint32_t readCop0(uint32_t index);
-+        void writeCop0(uint32_t index, uint32_t value);
-+        void executeCop2(uint32_t instr);
-+        void executeVectorLoadStore(uint32_t instr, bool store);
++        void decode(uint32_t index);
 +    };
 +};
 diff --git a/src/gbi/rt64_rsp_vu.h b/src/gbi/rt64_rsp_vu.h

@@ -79,8 +79,33 @@ of each run, and graphics (RT64's thread) and audio (the RSP task thread)
 now run at the same time, so one could load and store through the other's
 DMEM. The pointer is thread-local now.
 
-**Still to confirm:** that the title screen now follows the logo (the test
-run under software rendering was still in progress at this commit).
+**Tested on Windows** (after the commit above): the game goes on past the
+Factor 5 logo into the attract cutscene and the title screen's music, and
+into a mission. Still: slow and stuttering, crackling audio, the title
+screen black, models looking "tessellated", and a crash in a mission.
+
+**Speed.** The interpreter now decodes IMEM into handler pointers the first
+time each instruction runs (again where a DMA overwrites it: the overlays),
+with a handler per vector function and element, so nothing switches at run
+time; aligned scalar loads and stores and DMA rows are copied directly.
+Same RDP output on every captured task, in about half the host
+instructions (a heavy intro frame went from ~25 to ~13 ms here). The audio
+task is about 1 ms. The one-time reciprocal table set-up starts its search
+from the square root instead of 2^17.
+
+**3D triangles by default.** The "tessellated" look is most likely the RDP
+triangles RT64 draws in screen space (seams between them). The 3D path is
+now the default (`RT64_NABOO_RDP_TRIANGLES=1` for the RDP triangles), with
+RT64's interpolation turned off for its matrices (`matrixId` with every
+component skipped) until the camera can be told apart: no detached limbs,
+frames shown as the game makes them.
+
+**Not reproduced here yet:** the black title screen (the title draws a
+picture from RAM, `0x8021B420` up, as texture rectangles into a 512-wide
+colour image at `0x8076F000`) and the crash in a mission (in the runtime's
+`osEepromLongRead`, called from `func_410DA1F8`, by the crash log's best
+guess). Under software rendering this machine is too slow to get there:
+after the logo it sits in a load (`func_4000B258` waiting for a message).
 
 ## 2026-10-27, round 17: running Factor 5's microcode itself
 

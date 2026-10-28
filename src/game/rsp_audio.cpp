@@ -100,5 +100,9 @@ RspExitReason musyx_audio_interpreted(uint8_t* rdram, uint32_t ucode_addr) {
         return RspExitReason::Unsupported;
     }
 
+    if (getenv("NABOO_AUDIO_STATS") != nullptr && (task_count % 100) == 0) {
+        fprintf(stderr, "[audio] task %d done\n", task_count);
+    }
+
     return RspExitReason::Broke;
 }
