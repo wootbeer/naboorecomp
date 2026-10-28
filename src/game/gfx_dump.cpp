@@ -5,11 +5,14 @@
 // Files go to NABOO_DUMP_DIR (default: the working directory):
 //   gfx_<n>.rdram  8 MB, big-endian, physical addresses
 //   gfx_<n>.txt    the task's address and its OSTask words
+// F12 also saves the next task, whatever the list (into the game's folder, or
+// NABOO_DUMP_DIR).
 // Hooked at the start of func_40023558, the game's RSP task launcher, which
 // starts the task at *(OSTask**)0x40080120 (naboo.us.rev0.toml).
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <set>
 #include <string>
 #include <vector>
@@ -37,12 +40,15 @@ namespace {
     }
 }
 
+static std::atomic<bool> dump_requested{ false };
+
+extern "C" void naboo_request_gfx_dump() {
+    dump_requested = true;
+}
+
 extern "C" void naboo_gfx_dump(uint8_t* rdram) {
     static const std::set<int> wanted = wanted_tasks();
     static int gfx_tasks = 0;
-    if (wanted.empty()) {
-        return;
-    }
 
     constexpr gpr kCurrentTask = (gpr)(int32_t)0x40080120;
     gpr task = (gpr)(int32_t)MEM_W(0, kCurrentTask);
@@ -50,7 +56,7 @@ extern "C" void naboo_gfx_dump(uint8_t* rdram) {
         return;
     }
     gfx_tasks++;
-    if (!wanted.contains(gfx_tasks)) {
+    if (!wanted.contains(gfx_tasks) && !dump_requested.exchange(false)) {
         return;
     }
 

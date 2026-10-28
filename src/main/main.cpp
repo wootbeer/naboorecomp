@@ -201,6 +201,15 @@ static int SDLCALL close_watch(void*, SDL_Event* event) {
     return 1;
 }
 
+// F12 saves the next graphics task for offline study (src/game/gfx_dump.cpp).
+extern "C" void naboo_request_gfx_dump();
+static int dump_key_watch(void*, SDL_Event* event) {
+    if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F12 && event->key.repeat == 0) {
+        naboo_request_gfx_dump();
+    }
+    return 1;
+}
+
 static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
 
     uint32_t flags = SDL_WINDOW_RESIZABLE;
@@ -219,6 +228,7 @@ static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callba
     }
     set_window_icon(window);
     SDL_AddEventWatch(close_watch, nullptr);
+    SDL_AddEventWatch(dump_key_watch, nullptr);
 
 #if defined(_WIN32)
     SDL_SysWMinfo wm_info;
