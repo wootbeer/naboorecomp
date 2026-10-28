@@ -36,6 +36,17 @@ if (MSVC)
     string(REPLACE "/EHsc" "/EHs" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
+# Line tables in a PDB on Windows, so crash_log.txt can name the functions of
+# the runtime, RT64 and the rest (src/main/crash_handler.cpp). The recompiled
+# game code, which the crash handler names on its own, goes without.
+if (MSVC)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-gline-tables-only>)
+    else()
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Z7>)
+    endif()
+endif()
+
 # Keep the build machine's folders (e.g. the Windows user name) out of the
 # binaries: source paths that end up in them, through __FILE__ in asserts and
 # log messages or in debug info, are made relative to the repo root. Both
@@ -133,6 +144,8 @@ target_compile_options(RecompiledFuncs PRIVATE
     -falign-functions=16
     # Declarations for the [[patches.hook]] text in naboo.us.rev0.toml.
     ${NABOO_RECOMP_HOOKS_FORCE_INCLUDE}
+    # No debug info for the recompiled code (see the line tables above).
+    $<$<AND:$<BOOL:${MSVC}>,$<C_COMPILER_ID:Clang>>:/clang:-g0>
     # Debugging aid: e.g. -DNABOO_FUNCS_DEBUG_FLAGS=-fno-inline so a debugger
     # attributes code to the game function it belongs to.
     ${NABOO_FUNCS_DEBUG_FLAGS}
@@ -329,6 +342,9 @@ endif()
 if (MSVC)
     # Disable identical code folding, since this breaks mod function patching as multiple functions can get merged into one.
     target_link_options(NabooRecompiled PRIVATE /OPT:NOICF)
+    # The PDB for crash_log.txt (/DEBUG also turns off /OPT:REF; keep it on).
+    target_link_options(NabooRecompiled PRIVATE /DEBUG /OPT:REF)
+    target_link_libraries(NabooRecompiled PRIVATE Dbghelp.lib)
 elseif (APPLE)
     # Use a wrapper around ld64 that respects segprot's `max_prot` value in order
     # to make our executable memory writable (required for mod function patching)

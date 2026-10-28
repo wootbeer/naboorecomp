@@ -15,6 +15,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <dbghelp.h>
 #elif defined(__linux__)
 #include <csignal>
 #include <dlfcn.h>
@@ -89,6 +90,37 @@ namespace {
         bool write;
     };
 
+    // The name of the host function at `addr` and the offset into it: from the PDB on
+    // Windows, the dynamic symbol table elsewhere. False when it isn't known.
+    bool host_symbol(uintptr_t addr, char* out, size_t size) {
+#if defined(_WIN32)
+        static bool initialized = false;
+        static bool available = false;
+        if (!initialized) {
+            initialized = true;
+            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+            available = SymInitialize(GetCurrentProcess(), nullptr, TRUE) != FALSE;
+        }
+        if (!available) return false;
+        alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = 255;
+        DWORD64 displacement = 0;
+        if (!SymFromAddr(GetCurrentProcess(), addr, &displacement, symbol)) return false;
+        snprintf(out, size, "%s+0x%llx", symbol->Name, (unsigned long long)displacement);
+        return true;
+#elif defined(__linux__)
+        Dl_info dl{};
+        if (dladdr((void*)addr, &dl) == 0 || dl.dli_sname == nullptr) return false;
+        snprintf(out, size, "%s+0x%zx", dl.dli_sname, (size_t)(addr - (uintptr_t)dl.dli_saddr));
+        return true;
+#else
+        (void)addr; (void)out; (void)size;
+        return false;
+#endif
+    }
+
     void report(FILE* out, const Fault& fault, const uintptr_t* stack, size_t stack_words) {
         const uintptr_t pc = fault.pc;
         const bool has_access = fault.has_access;
@@ -105,6 +137,10 @@ namespace {
         }
         else {
             fprintf(out, "Not in a recompiled game function.\n");
+            char name[320];
+            if (host_symbol(pc, name, sizeof(name))) {
+                fprintf(out, "Host function: %s\n", name);
+            }
         }
         if (has_access) {
             if (in_rdram(access)) {
@@ -122,6 +158,24 @@ namespace {
             if (f != nullptr && f->vram != last) {
                 fprintf(out, "  func_%08X\n", f->vram);
                 last = f->vram;
+                listed++;
+            }
+        }
+
+        // Other code addresses on the stack (return addresses, or stale values: best effort).
+        fprintf(out, "Host functions on the stack (best effort):\n");
+        listed = 0;
+        char last_name[320] = "";
+        for (size_t i = 0; i < stack_words && listed < 24; i++) {
+            if (find_game_func(stack[i]) != nullptr) continue;
+            char name[320];
+            if (host_symbol(stack[i], name, sizeof(name))) {
+                // Compare without the offset so a function is listed once in a row.
+                const char* plus = strrchr(name, '+');
+                const size_t length = plus != nullptr ? (size_t)(plus - name) : strlen(name);
+                if (strncmp(name, last_name, length) == 0 && last_name[length] == '+') continue;
+                fprintf(out, "  %s\n", name);
+                snprintf(last_name, sizeof(last_name), "%s", name);
                 listed++;
             }
         }

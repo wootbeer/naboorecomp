@@ -107,6 +107,12 @@ colour image at `0x8076F000`) and the crash in a mission (in the runtime's
 guess). Under software rendering this machine is too slow to get there:
 after the logo it sits in a load (`func_4000B258` waiting for a message).
 
+**Crash logs name host functions.** For the mission crash: the Windows
+build now writes line tables to a PDB (`-gline-tables-only` with clang-cl,
+not for the recompiled game code), and crash_log.txt adds the host function
+the fault is in and the host functions found on the stack (DbgHelp's
+`SymFromAddr`; `dladdr` on Linux).
+
 ## 2026-10-27, round 17: running Factor 5's microcode itself
 
 **What changed.** RT64 now runs the game's graphics microcode in an RSP
