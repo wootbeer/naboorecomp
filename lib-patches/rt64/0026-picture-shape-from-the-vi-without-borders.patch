@@ -1,0 +1,25 @@
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index 0a06d10..96b472e 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -258,7 +258,19 @@ namespace RT64 {
+         // on the screen. To work around that, the viewport the buffer will be drawn in will be expanded so only
+         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
+         // specified by the VI.
+-        const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
++        hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
++
++        // Without the borders, the picture keeps the shape the TV gives it, not the
++        // framebuffer's: the VI stretches its region of the framebuffer over (hEnd - hStart)
++        // of the 640 dots across a 4:3 screen, and (vEnd - vStart) of its 480 half-lines down.
++        // For 320x240 that's close to the framebuffer's own shape, but not for Battle for
++        // Naboo's 400x444, which was shown nearly square.
++        const float viWidth = float(vi.hRegion.hEnd) - float(vi.hRegion.hStart);
++        const float viHeight = float(vi.vRegion.vEnd) - float(vi.vRegion.vStart);
++        if (removeBlackBorders && (viWidth > 0.0f) && (viHeight > 0.0f) && (float(sdSize.y) > 0.0f)) {
++            const float displayAspect = (4.0f / 3.0f) * (viWidth / 640.0f) / (viHeight / 480.0f);
++            sdSize = hlslpp::float2(float(sdSize.y) * displayAspect, float(sdSize.y));
++        }
+         const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
+         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
+ 

@@ -1,0 +1,78 @@
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 41b14dd..3290724 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -125,8 +125,9 @@ void set_audio_frequency(uint32_t freq);
+ void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
+ uint32_t get_remaining_audio_bytes();
+ // How many AI interrupts to raise at this VI so the audio queued for playback stays near a
+-// target: the game answers each one with a buffer (see events.cpp).
+-uint32_t ai_events_due();
++// target: the game answers each one with a buffer (see events.cpp). `pending` is how many
++// earlier ones are still waiting in the game's queue.
++uint32_t ai_events_due(uint32_t pending);
+ 
+ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+@@ -135,6 +136,10 @@ struct audio_callbacks_t {
+     queue_samples_t* queue_samples;
+     get_samples_remaining_t* get_frames_remaining;
+     set_frequency_t* set_frequency;
++    // Optional: the most AI interrupts the game can answer with audio it has made, for a game
++    // that plays from a ring of buffers it fills on its own schedule (see ai_events_due).
++    using get_ai_events_allowed_t = uint32_t();
++    get_ai_events_allowed_t* get_ai_events_allowed = nullptr;
+ };
+ 
+ // TODO: Most of the members of this struct are not used by ultramodern. Should we move them to librecomp instead?
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index 81cdac9..8e16771 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -35,7 +35,7 @@ static std::atomic<uint32_t> ai_last_buffer_bytes{ 0 };
+ static constexpr uint32_t ai_target_ms = 75;
+ static constexpr uint32_t ai_max_events_per_vi = 3;
+ 
+-uint32_t ultramodern::ai_events_due() {
++static uint32_t ai_events_wanted() {
+     const uint32_t buffer_bytes = ai_last_buffer_bytes.load();
+     if (buffer_bytes == 0 || audio_callbacks.get_frames_remaining == nullptr) {
+         // Nothing queued yet: one per VI, to start the game off.
+@@ -52,6 +52,22 @@ uint32_t ultramodern::ai_events_due() {
+     return std::min(due, ai_max_events_per_vi);
+ }
+ 
++// On the N64 the AI and the VI run off the same clock, so a game that makes its audio once
++// per VI can't fall behind the AI unless it misses VIs. Here the AI follows the PC's sound
++// card instead, and a game thread held up for a VI or two (by a long graphics task, say)
++// lets it run ahead: a game that plays from a ring of buffers then plays ones it hasn't
++// refilled yet, a loop of old audio heard as a squeal (Battle for Naboo). Such a game can
++// say how far ahead the AI may go; past that, playback waits for it (a short gap) instead.
++uint32_t ultramodern::ai_events_due(uint32_t pending) {
++    uint32_t due = ai_events_wanted();
++    if (audio_callbacks.get_ai_events_allowed != nullptr) {
++        // Interrupts the game hasn't taken yet will advance it as far as new ones would.
++        const uint32_t allowed = audio_callbacks.get_ai_events_allowed();
++        due = std::min(due, allowed > pending ? allowed - pending : 0);
++    }
++    return due;
++}
++
+ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_t byte_count) {
+     ai_last_buffer_bytes.store(byte_count);
+ 
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index d8c0d34..d8f33e5 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -257,7 +257,9 @@ void vi_thread_func() {
+             if (events_context.ai.mq != NULLPTR) {
+                 // As many AI interrupts as playback needs (audio.cpp), each not requeued if the
+                 // queue was full for the same reason as the VI message above.
+-                const uint32_t ai_events = ultramodern::ai_events_due();
++                uint8_t* rdram = events_context.rdram;
++                const uint32_t ai_pending = (uint32_t)TO_PTR(OSMesgQueue, events_context.ai.mq)->validCount;
++                const uint32_t ai_events = ultramodern::ai_events_due(ai_pending);
+                 for (uint32_t i = 0; i < ai_events; i++) {
+                     ultramodern::enqueue_external_message_src(events_context.ai.mq, events_context.ai.msg, false, ultramodern::EventMessageSource::Ai);
+                 }

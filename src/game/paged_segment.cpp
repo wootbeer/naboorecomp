@@ -27,8 +27,12 @@ namespace {
 // src/main/crash_handler.cpp: lets crash reports turn host addresses into N64 ones.
 extern "C" void naboo_crash_note_rdram(uint8_t* rdram);
 
+// src/game/audio_ring.cpp: limits AI interrupts to the audio the game has made.
+void naboo_audio_ring_note_rdram(uint8_t* rdram);
+
 void naboo_on_init(uint8_t* rdram, recomp_context*) {
     naboo_crash_note_rdram(rdram);
+    naboo_audio_ring_note_rdram(rdram);
 
     // The game reads libultra's __osRunningThread (0x4004ECD0) itself, about
     // 40 places, e.g. to find the current process (func_40006780). The

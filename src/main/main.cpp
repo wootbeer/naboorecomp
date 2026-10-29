@@ -109,19 +109,31 @@ static RspExitReason skip_audio_task(uint8_t*, uint32_t) {
     return RspExitReason::Broke;
 }
 
+// src/game/audio_ring.cpp: which of the game's audio buffers an audio task has written.
+void naboo_audio_task_begin();
+void naboo_audio_task_end();
+
+template <RspUcodeFunc* run>
+static RspExitReason audio_task(uint8_t* rdram, uint32_t ucode_addr) {
+    naboo_audio_task_begin();
+    const RspExitReason result = run(rdram, ucode_addr);
+    naboo_audio_task_end();
+    return result;
+}
+
 static RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     switch (task->t.type) {
     case M_AUDTASK:
         if (getenv("NABOO_NO_AUDIO") != nullptr) {
-            return skip_audio_task;
+            return audio_task<skip_audio_task>;
         }
 #ifdef NABOO_HAS_RSP_AUDIO
         // NABOO_AUDIO_RECOMP=1: the unfinished RSPRecomp version instead.
         if (getenv("NABOO_AUDIO_RECOMP") != nullptr) {
-            return musyx_audio;
+            return audio_task<musyx_audio>;
         }
 #endif
-        return musyx_audio_interpreted;
+        return audio_task<musyx_audio_interpreted>;
     default:
         fprintf(stderr, "No RSP microcode registered for task type %" PRIu32 ".\n", task->t.type);
         return nullptr;
@@ -204,6 +216,7 @@ static int SDLCALL close_watch(void*, SDL_Event* event) {
 // F12 saves the next graphics task for offline study (src/game/gfx_dump.cpp).
 extern "C" void naboo_request_gfx_dump();
 void naboo_install_exit_trace();
+uint32_t naboo_ai_events_allowed(); // src/game/audio_ring.cpp
 static int dump_key_watch(void*, SDL_Event* event) {
     if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F12 && event->key.repeat == 0) {
         naboo_request_gfx_dump();
@@ -341,6 +354,17 @@ static void queue_samples(int16_t* audio_data, size_t sample_count) {
     for (size_t i = 0; i + 1 < sample_count; i += 2) {
         buffer[i + 0] = audio_data[i + 1] * scale;
         buffer[i + 1] = audio_data[i + 0] * scale;
+    }
+
+    // Testing switch: NABOO_AUDIO_OUT=file saves what the game makes (16-bit stereo, left first,
+    // at the game's rate), before any of the queue's dropping.
+    static FILE* audio_out = [] { const char* v = std::getenv("NABOO_AUDIO_OUT"); return v != nullptr ? fopen(v, "wb") : nullptr; }();
+    if (audio_out != nullptr) {
+        for (size_t i = 0; i + 1 < sample_count; i += 2) {
+            const int16_t frame[2] = { audio_data[i + 1], audio_data[i + 0] };
+            fwrite(frame, sizeof(frame), 1, audio_out);
+        }
+        fflush(audio_out);
     }
 
     std::lock_guard<std::mutex> lock(audio_mutex);
@@ -585,6 +609,7 @@ int main(int argc, char** argv) {
         .queue_samples = queue_samples,
         .get_frames_remaining = get_frames_remaining,
         .set_frequency = set_frequency,
+        .get_ai_events_allowed = naboo_ai_events_allowed,
     };
 
     ultramodern::input::callbacks_t input_callbacks{

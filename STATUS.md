@@ -44,6 +44,46 @@ the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
 
+## 2026-10-28, round 20: the squeal (stale audio buffers), the picture's shape
+
+**A loud squeal at craft select and in missions** (and the crackle at loud
+moments, round 18). `NABOO_AUDIO_OUT=file` now saves what the game hands the
+AI. In it, a tenth of the 192-frame buffers were exact copies of the one 8
+buffers before, in runs of one or two, and every buffer boundary was 1.5x
+rougher than the inside of a buffer. The RSP side is right: 81 audio tasks
+run through rsp-z64 (`ref_boot`) and the interpreter left identical RAM.
+
+The game plays from a ring of 0x300-byte buffers (8 at its usual 22050-29000
+Hz, 16 above; pointers at `0x40080330`, count at `0x40080328`). Its AI
+thread (`func_40033E00`) queues the next one at each AI interrupt and keeps
+the index at `0x4008032A`. Once a VI the sound engine (`func_400376A8`)
+refills the ones played since, at most 3 or 4 (`0x40080302`), from its
+cursor at `0x40090510`, and the scheduler runs the audio task that writes
+them after the engine's *next* pass (logged: each task wrote the buffers up
+to where the latest pass had started). On the N64 the AI takes 2-3 buffers
+a VI, steadily, on the same clock as the VI. Here AI interrupts follow the
+sound card (round 18, up to 3 a VI in bursts), and a game thread held up by
+a long graphics task delays the engine: the AI reached buffers whose task
+hadn't run and played what was left from 8 buffers earlier.
+
+Fix: `lib-patches/N64ModernRuntime/0010` lets a game cap the AI interrupts
+(`audio_callbacks_t::get_ai_events_allowed`, less those still waiting in
+the game's queue). `src/game/audio_ring.cpp` allows only buffers an audio
+task has written: a hook at the engine's pass (`naboo.us.rev0.toml`) notes
+where the cursor starts, and `src/main/main.cpp` records that at each audio
+task's start and publishes it at the end. If the game falls behind,
+playback now waits (a short gap) instead of looping old audio. After: 8 exact
+repeats in 9839 buffers (from 952 in 11611), and boundaries as smooth as
+the rest (861 vs 843).
+
+**The picture was nearly square.** With "remove black borders" (on by
+default) RT64 sized the picture from the framebuffer's pixels: 400x444 here,
+0.9:1, though the VI stretches those over 640 dots of a 4:3 screen.
+`lib-patches/rt64/0026` takes the shape from the VI's region instead
+((hEnd - hStart) of 640 dots across, (vEnd - vStart) of 480 half-lines
+down): about 1.45 for Naboo's 442-line picture, 1.35 for an ordinary
+320x240 one.
+
 ## 2026-10-28, round 19: craft select, the black title, the launcher's cursor
 
 **Craft select ended the game** ("Failed to find function at 0x410DA29C",

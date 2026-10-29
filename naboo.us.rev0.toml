@@ -56,6 +56,14 @@ func = "func_40033584"
 before_vram = 0x40033600
 text = "    if (ctx->r17 != 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
 
+# func_400376A8: the sound engine's once-a-VI pass, which refills the audio
+# buffers played since the last one. Notes where its cursor starts, for
+# src/game/audio_ring.cpp (STATUS.md round 20).
+[[patches.hook]]
+func = "func_400376A8"
+before_vram = 0x400376A8
+text = "    { extern void naboo_audio_pass_start(uint8_t *rdram); naboo_audio_pass_start(rdram); }"
+
 # func_400236E4 has no return: on the N64 it runs straight on into
 # func_40023734, which is also called on its own. Recompiled functions don't
 # fall through into the next one, so do it here (from its last instruction).
