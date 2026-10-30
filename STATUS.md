@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 19)
+## Overview (as of round 20)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -44,7 +44,7 @@ the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
 
-## 2026-10-28, round 20: the squeal (stale audio buffers), the picture's shape
+## 2026-10-30, round 20: the squeal (stale audio buffers), the picture's shape, skipping intros
 
 **A loud squeal at craft select and in missions** (and the crackle at loud
 moments, round 18). `NABOO_AUDIO_OUT=file` now saves what the game hands the
@@ -76,13 +76,34 @@ playback now waits (a short gap) instead of looping old audio. After: 8 exact
 repeats in 9839 buffers (from 952 in 11611), and boundaries as smooth as
 the rest (861 vs 843).
 
-**The picture was nearly square.** With "remove black borders" (on by
-default) RT64 sized the picture from the framebuffer's pixels: 400x444 here,
-0.9:1, though the VI stretches those over 640 dots of a 4:3 screen.
-`lib-patches/rt64/0026` takes the shape from the VI's region instead
-((hEnd - hStart) of 640 dots across, (vEnd - vStart) of 480 half-lines
-down): about 1.45 for Naboo's 442-line picture, 1.35 for an ordinary
-320x240 one.
+**The picture was nearly square.** RT64 takes a frame's original shape
+(`aspectRatioSource`) from the framebuffer's pixels, square-pixel style:
+400x444 here, 0.9:1, though the VI stretches them over 640 dots of a 4:3
+screen. Everything after builds on it: the widescreen render target's width,
+how far the 3D view is widened, the presented picture. A first try that only
+widened the presented rectangle drew the picture smaller instead (the VI
+pass maps the framebuffer at a fixed scale). `lib-patches/rt64/0026` adds
+`VI::displayAspect()`, the shape the TV gives the VI's region ((hEnd -
+hStart) of 640 dots across, (vEnd - vStart) of 474 half-lines down, so a
+320x240 game stays 4:3; about 1.43 for Naboo), uses it as the frame's
+source aspect, and stretches the presented picture across by the
+framebuffer's pixel shape. With "expand" the 3D now fills a 16:9 window.
+Full-screen 2D images (the title) are widened with it, as RT64 does.
+
+**Skipping an intro hung the game** (a fade to black, during the LucasArts
+logo or a mission's crawl; reported in round 19 as "skipping the LucasArts
+logo"). The main thread (priority 10) waits in `func_40033584` for all of
+the sound engine's voices to finish; the scheduler (`func_40022960`,
+priority 117), which runs the sound engine each VI, was blocked for good in
+an `osSendMesg` to the frame loop's tick queue (`0x400800E0`, one slot). It
+sends the tick each VI while the flag at `0x4004D9F0` says the frame loop
+waits for one (`func_400231C8`), blocking if the queue is full. The skip
+stops the frame loop's thread as it waits, flag set, and the intro's manager
+clears the flag later; here that came after a second tick, so the scheduler
+blocked, the sound engine stopped, and the voices never finished. The send
+is now `OS_MESG_NOBLOCK` (`naboo.us.rev0.toml`): a tick nobody waits for is
+dropped. After: five presses during the LucasArts logo go to the title, and
+key presses through a mission's crawl reach the mission.
 
 ## 2026-10-28, round 19: craft select, the black title, the launcher's cursor
 
@@ -115,7 +136,7 @@ cursor for what's under the mouse, and nothing does once the menus close.
 `src/main/main.cpp`'s `cursor_reset_watch` puts the arrow back on mouse
 motion while no menu is shown.
 
-**Not fixed: skipping the LucasArts logo.** A Start/A press during the
+**Not fixed (fixed in round 20): skipping the LucasArts logo.** A Start/A press during the
 LucasArts snow scene fades it nearly to black and the game stays there (it
 keeps drawing the dark scene). The same with real-time (SDL's dummy driver)
 or no audio tasks, so it isn't the audio. Next: find what the intro's

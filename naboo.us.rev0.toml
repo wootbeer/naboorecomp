@@ -180,6 +180,18 @@ func = "func_41014F70"
 vram = 0x41014FD8
 value = 0x00000000
 
+# The scheduler (func_40022960) sends the frame loop its once-a-VI tick, while
+# the frame loop is waiting for it (the flag at 0x4004D9F0), to a queue of one
+# (0x400800E0), and blocks if the queue is full. Skipping an intro stops the
+# frame loop's thread as it waits, flag set; the intro's manager clears the
+# flag, but here not before a second tick: the scheduler blocked for good, and
+# with it the sound engine the manager waits on (STATUS.md round 20). A tick
+# nobody's waiting for is dropped instead (OS_MESG_NOBLOCK).
+[[patches.instruction]]
+func = "func_40022960"
+vram = 0x40022C38
+value = 0x00003021
+
 # The hand-written routines at the end of .paged read tables placed after their
 # code through the return address of a `bltzal $zero` (never taken, but it
 # links). Each becomes a lui/addiu of that same address (STATUS.md round 4).

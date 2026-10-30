@@ -1,25 +1,157 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 2970e71..e3ae06d 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1621,6 +1621,7 @@ namespace RT64 {
+ 
+         if (viHistory.top().vi.visible()) {
+             workload.viFbSize = viHistory.top().vi.fbSize();
++            workload.viDisplayAspect = viHistory.top().vi.displayAspect();
+         }
+ 
+         // Log and reset profilers.
+diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
+index 3c50c57..3ad8e60 100644
+--- a/src/hle/rt64_vi.cpp
++++ b/src/hle/rt64_vi.cpp
+@@ -128,6 +128,21 @@ namespace RT64 {
+         }
+     }
+ 
++    float VI::displayAspect() const {
++        // The shape the TV gives the picture: the VI stretches its region of the framebuffer
++        // over (hEnd - hStart) dots and (vEnd - vStart) half-lines, out of a 4:3 picture of
++        // 640 dots by 474 half-lines (the usual NTSC region, so a 320x240 game is 4:3).
++        // Battle for Naboo's 400x444 framebuffer is shown at about 1.43, not 0.9.
++        const float regionWidth = float(hRegion.hEnd) - float(hRegion.hStart);
++        const float regionHeight = float(vRegion.vEnd) - float(vRegion.vStart);
++        if ((regionWidth > 0.0f) && (regionHeight > 0.0f)) {
++            return (4.0f / 3.0f) * (regionWidth / 640.0f) / (regionHeight / 474.0f);
++        }
++
++        const hlslpp::uint2 size = fbSize();
++        return (size.y > 0) ? float(size.x) / float(size.y) : (4.0f / 3.0f);
++    }
++
+     float VI::xScaleFloat() const {
+         return (1024.0f / xTransform.xScale);
+     }
+diff --git a/src/hle/rt64_vi.h b/src/hle/rt64_vi.h
+index 5b70e01..75aa855 100644
+--- a/src/hle/rt64_vi.h
++++ b/src/hle/rt64_vi.h
+@@ -141,6 +141,7 @@ namespace RT64 {
+         uint8_t fbSiz() const;
+         uint32_t fbAddress() const;
+         hlslpp::uint2 fbSize() const;
++        float displayAspect() const;
+         float xScaleFloat() const;
+         float xOffsetFloat() const;
+         float yScaleFloat() const;
+diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
+index 8ea27d5..b6a8927 100644
+--- a/src/hle/rt64_workload.h
++++ b/src/hle/rt64_workload.h
+@@ -226,6 +226,7 @@ namespace RT64 {
+         FramebufferStorage fbStorage;
+         uint32_t viOriginalRate;
+         hlslpp::uint2 viFbSize = {};
++        float viDisplayAspect = 0.0f;
+         DebuggerRenderer debuggerRenderer;
+         DebuggerCamera debuggerCamera;
+         std::multimap<uint32_t, uint32_t> transformIdMap;
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..28ea52b 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -120,7 +120,7 @@ namespace RT64 {
+         framebufferRenderer->updateMultisampling();
+     }
+ 
+-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
++    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, WorkloadConfiguration &workloadConfig) {
+         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
+         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
+         ext.sharedResources->swapChainSizeChanged = false;
+@@ -131,7 +131,14 @@ namespace RT64 {
+         const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
+ 
+         // Compute the aspect ratio to be used for the frame.
+-        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        // The picture's shape on the TV, which isn't the framebuffer's when its pixels aren't
++        // square (VI::displayAspect).
++        if (viDisplayAspect > 0.0f) {
++            workloadConfig.aspectRatioSource = viDisplayAspect;
++        }
++        else {
++            workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        }
+ 
+         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
+         switch (ratioMode) {
+@@ -912,7 +919,7 @@ namespace RT64 {
+ 
+                 ElapsedTimer workloadTimer;
+                 workloadProfiler.start();
+-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
++                threadConfigurationUpdate(workload.viFbSize, workload.viDisplayAspect, workloadConfig);
+ 
+                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
+                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+index bde2f03..9166fc1 100644
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -111,7 +111,7 @@ namespace RT64 {
+         void waitForWorkloadId(uint64_t waitId);
+         void setup(const External &ext);
+         void updateMultisampling();
+-        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);
++        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, WorkloadConfiguration &workloadConfig);
+         void threadConfigurationValidate();
+         void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
+             const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
-index 0a06d10..96b472e 100644
+index 0a06d10..d4b1f9a 100644
 --- a/src/render/rt64_vi_renderer.cpp
 +++ b/src/render/rt64_vi_renderer.cpp
-@@ -258,7 +258,19 @@ namespace RT64 {
-         // on the screen. To work around that, the viewport the buffer will be drawn in will be expanded so only
-         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
-         // specified by the VI.
--        const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
-+        hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
-+
-+        // Without the borders, the picture keeps the shape the TV gives it, not the
-+        // framebuffer's: the VI stretches its region of the framebuffer over (hEnd - hStart)
-+        // of the 640 dots across a 4:3 screen, and (vEnd - vStart) of its 480 half-lines down.
-+        // For 320x240 that's close to the framebuffer's own shape, but not for Battle for
-+        // Naboo's 400x444, which was shown nearly square.
-+        const float viWidth = float(vi.hRegion.hEnd) - float(vi.hRegion.hStart);
-+        const float viHeight = float(vi.vRegion.vEnd) - float(vi.vRegion.vStart);
-+        if (removeBlackBorders && (viWidth > 0.0f) && (viHeight > 0.0f) && (float(sdSize.y) > 0.0f)) {
-+            const float displayAspect = (4.0f / 3.0f) * (viWidth / 640.0f) / (viHeight / 480.0f);
-+            sdSize = hlslpp::float2(float(sdSize.y) * displayAspect, float(sdSize.y));
-+        }
+@@ -262,20 +262,30 @@ namespace RT64 {
          const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
          const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
  
++        // Without the borders, the picture keeps the shape the TV gives it (VI::displayAspect),
++        // not the framebuffer's, so it's stretched across by the shape of the framebuffer's
++        // pixels; on top of any widening for a wider aspect ratio, already in hdSize.
++        float xStretch = 1.0f;
++        const hlslpp::uint2 fbSize = vi.fbSize();
++        if (removeBlackBorders && (fbSize.x > 0) && (fbSize.y > 0)) {
++            xStretch = vi.displayAspect() / (float(fbSize.x) / float(fbSize.y));
++        }
++        const hlslpp::float2 fitSize = { float(hdSize.x) * xStretch, float(hdSize.y) };
++        auto toWindow = [&](float x, float y) {
++            hlslpp::float2 hd = fromSDtoHD({ x, y }, sdSize, hdSize);
++            hd.x *= xStretch;
++            return fromHDtoWindow(hd, fitSize, windowSize);
++        };
++
+         // Query the VI for the current rendering area.
+         hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
+         hlslpp::float4 viCropRect = vi.cropRectangle() * sdSize.xyxy;
+ 
+         // Scale all the rectangles to the space of the Window.
+-        hlslpp::float2 topLeftViewport = fromSDtoHD({ float(viViewRect.x), float(viViewRect.y) }, sdSize, hdSize);
+-        hlslpp::float2 bottomRightViewport = fromSDtoHD({ float(viViewRect.x + viViewRect.z), float(viViewRect.y + viViewRect.w) }, sdSize, hdSize);
+-        topLeftViewport = fromHDtoWindow(topLeftViewport, hdSize, windowSize);
+-        bottomRightViewport = fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
+-
+-        hlslpp::float2 topLeftScissor = fromSDtoHD({ float(viCropRect.x), float(viCropRect.y) }, sdSize, hdSize);
+-        hlslpp::float2 bottomRightScissor = fromSDtoHD({ float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w) }, sdSize, hdSize);
+-        topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
+-        bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
++        hlslpp::float2 topLeftViewport = toWindow(float(viViewRect.x), float(viViewRect.y));
++        hlslpp::float2 bottomRightViewport = toWindow(float(viViewRect.x + viViewRect.z), float(viViewRect.y + viViewRect.w));
++        hlslpp::float2 topLeftScissor = toWindow(float(viCropRect.x), float(viCropRect.y));
++        hlslpp::float2 bottomRightScissor = toWindow(float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w));
+ 
+         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
+         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
