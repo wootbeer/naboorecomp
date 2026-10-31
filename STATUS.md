@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 20)
+## Overview (as of round 21)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,56 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-10-31, round 21: noise at craft select (lost stream reads); a reference from mupen
+
+**Loud noise at craft select** (still, after round 20). Recorded with
+`NABOO_AUDIO_OUT`, the first seconds of craft select matched an emulator,
+then a sound came in at RMS 11000-18000 (mupen: 3000-6000) with flat-topped
+bursts at full scale, for 15 s or more.
+
+A reference came first: `tools/mupen_play.c` plays the ROM on mupen64plus's
+low-level RSP and video plugins with two plugins of ours
+(`tools/mupen_script_plugins.c`): input that presses Start or A on chosen
+frames, and audio that saves every AI buffer in `NABOO_AUDIO_OUT`'s format.
+It can also save RDRAM at a frame. 10 presses from the title reach craft
+select at about frame 7500 (the crawl isn't skippable there without a
+save).
+
+The trail, briefly: audio tasks from craft select give identical RAM on
+rsp-z64 and the interpreter, so the RSP is right. The microcode reads a
+buffer at `0x2D04A0` full of `0x8000` where mupen's holds zeros; a
+watchpoint found it written by the hand-written routines at the end of
+`.paged` (`func_410DA0A4` -> `func_410D9EE0`), the synthesis filter of the
+speech decoder (`func_410D82A0`, which streams compressed speech into a
+4 KB ring in 0x400-byte reads). Run in unicorn on the same input, the
+original MIPS code of the filter, and of the whole frame decoder
+(`func_410D8CE0`), gave the same output as the recompiled code. The input
+was wrong: the ring held chunks out of order, one in about three never
+read. The decoder then turned stale bytes into an unstable filter.
+
+The speech player asks for a chunk through a callback (`func_400394C8`)
+that queues the read on a list of four (`func_40039838`) and reports it
+done at once. Each VI the sound engine's pass (`func_400376A8`) waits for
+its last batch of reads (`func_40034D68`), starts a new batch
+(`func_40034DFC`), moves the list into it (`func_40039510`, through the hook
+at `0x400802DC`), renders the buffers the AI has played, and hands the batch
+to the file loader (`func_40034DB0`). With nothing to render it jumps past
+that last step, and the next pass starts a new batch: the reads were lost.
+On the N64 the AI always takes a buffer or two between passes; here it can
+take none in a VI (round 18's pacing, round 20's limit). A hook at that
+jump's target (`0x40037998`, `naboo.us.rev0.toml`) hands over a batch that
+holds reads and isn't already in flight. After: every chunk is read, in
+order, and craft select measures 3000-5300 as on mupen, whether the crawl
+is played or skipped.
+
+Two dead ends, for the record: the file loader's 1 ms `osYieldThread` wait
+(round 12) isn't the cause (reads were lost, not late), and the list of
+four doesn't overflow.
+
+Not fixed: a few seconds of the cutscene before craft select are much louder
+than on mupen (RMS ~16000 against ~5500, with clipping), with no reads lost
+and no sign of the filter. Probably the "loud moments" of round 18.
 
 ## 2026-10-30, round 20: the squeal (stale audio buffers), the picture's shape, skipping intros
 

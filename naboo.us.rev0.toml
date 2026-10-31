@@ -64,6 +64,21 @@ func = "func_400376A8"
 before_vram = 0x400376A8
 text = "    { extern void naboo_audio_pass_start(uint8_t *rdram); naboo_audio_pass_start(rdram); }"
 
+# func_400376A8, the sound engine's once-a-VI pass: it waits for the last
+# batch of stream reads, starts a new one, moves the reads streams asked for
+# since into it, renders the audio buffers the AI has played, then hands the
+# batch to the file loader (func_40034DB0). With nothing to render it skips to
+# here, past that last step, and the next pass starts a new batch: the reads
+# were lost, though their streams had been told they were done. The speech
+# decoder (cutscenes, craft select) then read chunks that never arrived, and
+# its filter blew up into loud noise. On the N64 the AI always takes a buffer
+# or two between passes; here it can take none (STATUS.md round 21). So a
+# batch that's still waiting is handed over here.
+[[patches.hook]]
+func = "func_400376A8"
+before_vram = 0x40037998
+text = "    if ((MEM_HU(0X2D6, (gpr)(int32_t)0x40080000) != 0) && (MEM_BU(0X42C, (gpr)(int32_t)0x40090000) == 0)) { recomp_context naboo_saved = *ctx; func_40034DB0(rdram, ctx); *ctx = naboo_saved; }"
+
 # func_400236E4 has no return: on the N64 it runs straight on into
 # func_40023734, which is also called on its own. Recompiled functions don't
 # fall through into the next one, so do it here (from its last instruction).
