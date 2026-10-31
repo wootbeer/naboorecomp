@@ -207,6 +207,15 @@ func = "func_40022960"
 vram = 0x40022C38
 value = 0x00003021
 
+# The opening crawl (func_410A0B50) can be skipped with A or Start only once
+# game flag 0x41 is set (func_410A6948(0x41), stored at $sp+0xF0): from the
+# second viewing on, it seems. Always allowed here, to get into the game
+# faster (STATUS.md round 21): $sp stands in for the flag, and is never 0.
+[[patches.instruction]]
+func = "func_410A0B50"
+vram = 0x410A0CD4
+value = 0xAFBD00F0
+
 # The hand-written routines at the end of .paged read tables placed after their
 # code through the return address of a `bltzal $zero` (never taken, but it
 # links). Each becomes a lui/addiu of that same address (STATUS.md round 4).

@@ -90,6 +90,13 @@ Two dead ends, for the record: the file loader's 1 ms `osYieldThread` wait
 (round 12) isn't the cause (reads were lost, not late), and the list of
 four doesn't overflow.
 
+**Start skips the opening crawl** (asked for, to test faster). The crawl
+(`func_410A0B50`) checks A or Start each frame only if game flag 0x41 is
+set (`func_410A6948(0x41)`, kept at `$sp+0xF0`), which a new save doesn't
+have: it appears to be "seen it once". An instruction patch stores `$sp`
+(never 0) there instead, so it's always skippable. Checked with no save: one
+press at the "STAR WARS" title goes to craft select.
+
 Not fixed: a few seconds of the cutscene before craft select are much louder
 than on mupen (RMS ~16000 against ~5500, with clipping), with no reads lost
 and no sign of the filter. Probably the "loud moments" of round 18.
