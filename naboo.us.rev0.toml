@@ -79,6 +79,31 @@ func = "func_400376A8"
 before_vram = 0x40037998
 text = "    if ((MEM_HU(0X2D6, (gpr)(int32_t)0x40080000) != 0) && (MEM_BU(0X42C, (gpr)(int32_t)0x40090000) == 0)) { recomp_context naboo_saved = *ctx; func_40034DB0(rdram, ctx); *ctx = naboo_saved; }"
 
+# func_41001FC4: the scene loop's Start handler (pause). The intro -- the N64,
+# LucasArts and Factor 5 logos -- is level 20 (byte 0x4004CB86) and can't be
+# skipped. Here Start asks for the level's end there, as its script does when
+# the logos finish (0x40096B88 bit 0: the loop fades out and moves on to the
+# title), to get into the game faster (STATUS.md round 21, src/game/intro_skip.cpp).
+[[patches.hook]]
+func = "func_41001FC4"
+before_vram = 0x41001FC4
+text = "    if ((MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) && ((MEM_W(0X6B88, (gpr)(int32_t)0x40090000) & 3) == 0)) { extern int naboo_intro_skip; naboo_intro_skip = 1; MEM_W(0X6B88, (gpr)(int32_t)0x40090000) |= 1; return; }"
+
+# func_4100096C: during a camera script (the logos are one, byte 0x4004CB8C)
+# the scene loop waits for the script's time to run out twice, before fading
+# out a level whose end was asked for ($v0 = 1 to fade, at 0x41000F88) and
+# before leaving it once faded ($v0 = 1 to go on, at 0x41001028). A skip
+# (above) goes ahead at once; it's forgotten when the level changes.
+[[patches.hook]]
+func = "func_4100096C"
+before_vram = 0x41000F88
+text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
+
+[[patches.hook]]
+func = "func_4100096C"
+before_vram = 0x41001028
+text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
+
 # func_400236E4 has no return: on the N64 it runs straight on into
 # func_40023734, which is also called on its own. Recompiled functions don't
 # fall through into the next one, so do it here (from its last instruction).
@@ -215,6 +240,13 @@ value = 0x00003021
 func = "func_410A0B50"
 vram = 0x410A0CD4
 value = 0xAFBD00F0
+
+# The same for the intro (func_4108ED40: the logos, through to the title),
+# with game flag 0x42 at $sp+0x2C.
+[[patches.instruction]]
+func = "func_4108ED40"
+vram = 0x4108EEC0
+value = 0xAFBD002C
 
 # The hand-written routines at the end of .paged read tables placed after their
 # code through the return address of a `bltzal $zero` (never taken, but it

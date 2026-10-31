@@ -97,6 +97,19 @@ have: it appears to be "seen it once". An instruction patch stores `$sp`
 (never 0) there instead, so it's always skippable. Checked with no save: one
 press at the "STAR WARS" title goes to craft select.
 
+**Start skips the intro logos too.** The N64, LucasArts and Factor 5 logos
+are level 20 (byte `0x4004CB86`), run by the scene loop (`func_4100096C`)
+as a camera script (byte `0x4004CB8C`, mode 7). The game has no skip for
+them: Start goes to the pause handler (`func_41001FC4`), which refuses
+during a script. A hook at its entry asks the level to end in level 20
+(`0x40096B88` bit 0, as the script does when the logos finish) and sets
+`naboo_intro_skip` (`src/game/intro_skip.cpp`). The loop then still waits
+for the script's time to run out, both before fading out (`0x41000F88`) and
+before leaving (`0x41001028`); hooks there go ahead while the flag is set,
+and drop it once the level has changed. One press at the N64 logo reaches
+the title in about 3 s (the logos run to about 54 s from boot); the title
+and menus behave as usual.
+
 Not fixed: a few seconds of the cutscene before craft select are much louder
 than on mupen (RMS ~16000 against ~5500, with clipping), with no reads lost
 and no sign of the filter. Probably the "loud moments" of round 18.
