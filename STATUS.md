@@ -120,14 +120,20 @@ start of play where the camera begins beside unbuilt parts of the level, for
 a second or two.
 
 **Terrain at the sides in open levels** (user's clip of the swamp escort:
-the hills end in jagged edges at the sides). Terrain is made for a view
-frustum of its own: `func_410232A8` and `func_410239E4` read the camera
-(0x4004C67C: fov at 0x18, viewport 400x448 at 0x10) and build a frustum
-corner on the stack, its horizontal half from the viewport's 4:3 shape
-(sp + 0x58 and sp + 0x90). Hooks just after (0x41023400, 0x41023B50) widen
-it by the same factor as the camera (`naboo_widen_terrain`). Not yet seen
-working: only the first mission is reachable here (setting the level byte,
-0x4004CB86, before it loads gives a broken level or a hang).
+the hills end in jagged edges at the sides; with the user's save, which
+starts at that level). Terrain is made only over the view's footprint on
+the ground: `func_4104E8CC` takes the camera's eye and four far corners (at
++0x80 and +0x8C in the camera, 0x40060DBC), clips them to a height band
+(`func_4104A1CC`) and fills the terrain grid row by row between them
+(`func_4104A8C0`), hence the jagged edge. The corners come from
+`func_41024064`, along the direction (-1.0, -0.7, 0.7 / tan(fov / 2)) at
+sp + 0x50, the 4:3 TV shape (the logged corners were 1.43 wide to 1 high).
+A hook after it's set (0x41024170) widens its x like the camera
+(`naboo_widen_terrain`); the hills now reach both sides. (`func_410232A8`
+and `func_410239E4`, which also read the camera's fov and viewport, were
+widened first: they aren't it, three times wider changed nothing; the
+microcode drops nothing at the edges, every triangle goes through the 3D
+hooks.)
 
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames

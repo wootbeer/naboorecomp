@@ -8,9 +8,9 @@
 // The level's portal walk (func_410112B0) has a projection of its own: it keeps a screen
 // rectangle for each cell it can see into, and scissors what's drawn in the cell to it. Its
 // horizontal scale (0x40060064) is narrowed by the same factor, or the cell rectangles stay
-// 4:3 and cut walls off in the wider picture. Open levels' terrain is made for a view
-// frustum of its own (func_410232A8, func_410239E4), whose horizontal corner is widened
-// the same way.
+// 4:3 and cut walls off in the wider picture. Open levels' terrain is made for the view's
+// footprint on the ground, from corners of its own (func_41024064, in the 4:3 TV shape),
+// whose horizontal extent is widened the same way.
 //
 // Cutscenes stay 4:3. Their levels are built only as far as the 4:3 camera sees (past
 // the sides there's sky, or nothing), so while the game is in its cinematic mode
