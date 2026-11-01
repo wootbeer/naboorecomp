@@ -93,6 +93,20 @@ scale by the same factor (`src/game/widescreen.cpp`), and the cell
 rectangles match the wide camera: the street at the start of the first
 mission now looks as in 4:3, with more of it at the sides.
 
+**What's left at the sides.** In the mission's opening cutscene and its
+first seconds, some of the extra strip at the sides is black (no wall, no
+sky). Every such area is outside what 4:3 shows at the same moment; it stays
+with every scissor set to the whole screen and doesn't follow the portal
+scale, so as far as can be told the level has nothing built there (a 4:3
+camera never sees it). Left as is.
+
+**A dark line along the right edge** (and the bottom, at some window
+sizes). The VI shows all 400 columns of the framebuffer (640 dots at 0.625),
+but the game's scissor ends a column short, so the last column is never
+drawn; on a TV it's in the overscan. Without borders, the VI renderer now
+leaves off the framebuffer's last column and row (`lib-patches/rt64/0026`,
+`VIRenderer::getViewportAndScissor`).
+
 ## 2026-10-31, round 21: noise at craft select (lost stream reads); a reference from mupen
 
 **Loud noise at craft select** (still, after round 20). Recorded with
