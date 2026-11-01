@@ -1,8 +1,8 @@
 diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
-index e1889e5..cabfc42 100644
+index e1889e5..9e613df 100644
 --- a/src/hle/rt64_present.h
 +++ b/src/hle/rt64_present.h
-@@ -21,6 +21,10 @@ namespace RT64 {
+@@ -21,6 +21,13 @@ namespace RT64 {
          std::vector<FramebufferOperation> fbOperations;
          DebuggerFramebuffer debuggerFramebuffer;
          bool paused = false;
@@ -10,26 +10,30 @@ index e1889e5..cabfc42 100644
 +        // Shown filling the window's width, cropping the top and bottom (a frame kept at its
 +        // original shape, rt64_keep_original_aspect: cutscenes, whose letterbox is cropped).
 +        bool fillWidth = false;
++
++        // With fillWidth, the height (0 to 1, from the top) that's put at the window's middle.
++        float fillCenterY = 0.5f;
          uint64_t presentId = 0;
          uint64_t workloadId = 0;
      };
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 5f434ad..194cf0c 100644
+index 5f434ad..2fb50dc 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
-@@ -324,6 +324,7 @@ namespace RT64 {
+@@ -324,6 +324,8 @@ namespace RT64 {
                      renderParams.filtering = filtering;
                      renderParams.vi = &present.screenVI;
                      renderParams.removeBlackBorders = removeBlackBorders;
 +                    renderParams.fillWidth = present.fillWidth;
++                    renderParams.fillCenterY = present.fillCenterY;
  
                      const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
                      if (useDownsampling) {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..7d14561 100644
+index 2970e71..6c1f71a 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
-@@ -27,6 +27,10 @@
+@@ -27,6 +27,14 @@
  #define MI_INTR_DP          0x00000020
  #define MI_INTR_SP          0x00000001
  
@@ -37,10 +41,14 @@ index 2970e71..7d14561 100644
 +// framed for 4:3 (see Workload::keepOriginalAspect).
 +extern "C" bool rt64_keep_original_aspect;
 +
++// Where in those frames' height the window's middle goes when they fill its width (0.5 for
++// the middle; a game whose letterbox isn't centered sets the middle of its picture).
++extern "C" float rt64_fill_width_center = 0.5f;
++
  namespace RT64 {
      const float ShiftScaleMap[] = {
          1.0f,
-@@ -1293,6 +1297,7 @@ namespace RT64 {
+@@ -1293,6 +1301,7 @@ namespace RT64 {
                          drawParams.rasterShaderCache = ext.rasterShaderCache;
                          drawParams.resolutionScale = resolutionScale;
                          drawParams.aspectRatioSource = 1.0f;
@@ -48,7 +56,7 @@ index 2970e71..7d14561 100644
                          drawParams.aspectRatioTarget = 1.0f;
                          drawParams.extAspectPercentage = 0.0f;
                          drawParams.horizontalMisalignment = 0.0f;
-@@ -1621,8 +1626,11 @@ namespace RT64 {
+@@ -1621,8 +1630,11 @@ namespace RT64 {
  
          if (viHistory.top().vi.visible()) {
              workload.viFbSize = viHistory.top().vi.fbSize();
@@ -60,20 +68,21 @@ index 2970e71..7d14561 100644
          // Log and reset profilers.
          dlCpuProfiler.end();
          dlCpuProfiler.log();
-@@ -1951,6 +1959,7 @@ namespace RT64 {
+@@ -1951,6 +1963,8 @@ namespace RT64 {
          if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
              // Push a new renderer event to the timeline for presenting this VI.
              present.screenVI = newVI;
 +            present.fillWidth = rt64_keep_original_aspect;
++            present.fillCenterY = rt64_fill_width_center;
              advancePresent(present, false);
              ext.presentQueue->advanceToNextPresent();
  
-@@ -2069,7 +2078,7 @@ namespace RT64 {
+@@ -2069,7 +2083,7 @@ namespace RT64 {
              ext.sharedQueueResources->configurationMutex.unlock();
              RenderViewport viewport;
              RenderRect scissor;
 -            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, viewport, scissor);
-+            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, false, viewport, scissor);
++            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, false, 0.5f, viewport, scissor);
  
              // Convert the mouse coordinates to native coordinates.
              hlslpp::float2 screenCursorPos;
@@ -320,7 +329,7 @@ index 5bc3a2a..3742420 100644
  
          ProjectionProcessor();
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
-index 0a06d10..a650882 100644
+index 0a06d10..7623314 100644
 --- a/src/render/rt64_vi_renderer.cpp
 +++ b/src/render/rt64_vi_renderer.cpp
 @@ -214,7 +214,7 @@ namespace RT64 {
@@ -328,7 +337,7 @@ index 0a06d10..a650882 100644
          RenderViewport viewport;
          RenderRect scissor;
 -        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
-+        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.fillWidth, viewport, scissor);
++        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.fillWidth, p.fillCenterY, viewport, scissor);
          p.commandList->setViewports(viewport);
          p.commandList->setScissors(scissor);
  
@@ -337,7 +346,7 @@ index 0a06d10..a650882 100644
      }
  
 -    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
-+    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, RenderViewport &viewport, RenderRect &scissor) {
++    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, float fillCenterY, RenderViewport &viewport, RenderRect &scissor) {
          // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
          //
          // VideoSD: This corresponds to the SD TV Scanline space, which is what the VI natively works on.
@@ -358,9 +367,9 @@ index 0a06d10..a650882 100644
 +            hlslpp::float2 hd = fromSDtoHD({ x, y }, sdSize, hdSize);
 +            hd.x *= xStretch;
 +            if (fillWidth && (fitSize.x > 0.0f)) {
-+                // Scaled to the window's width, centered; what's past the top and bottom is cut off.
++                // Scaled to the window's width, fillCenterY at its middle; what's past the top and bottom is cut off.
 +                const float relativeScale = windowSize.x / fitSize.x;
-+                return hlslpp::float2(windowSize.x / 2.0f + (hd.x - fitSize.x / 2.0f) * relativeScale, windowSize.y / 2.0f + (hd.y - fitSize.y / 2.0f) * relativeScale);
++                return hlslpp::float2(windowSize.x / 2.0f + (hd.x - fitSize.x / 2.0f) * relativeScale, windowSize.y / 2.0f + (hd.y - fitSize.y * fillCenterY) * relativeScale);
 +            }
 +
 +            return fromHDtoWindow(hd, fitSize, windowSize);
@@ -405,23 +414,24 @@ index 0a06d10..a650882 100644
  };
 \ No newline at end of file
 diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
-index ad7a7b4..ad724f8 100644
+index ad7a7b4..fadf0cf 100644
 --- a/src/render/rt64_vi_renderer.h
 +++ b/src/render/rt64_vi_renderer.h
-@@ -42,6 +42,7 @@ namespace RT64 {
+@@ -42,6 +42,8 @@ namespace RT64 {
              UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
              const VI *vi = nullptr;
              bool removeBlackBorders = false;
 +            bool fillWidth = false;
++            float fillCenterY = 0.5f;
          };
  
          VIRenderer();
-@@ -49,6 +50,6 @@ namespace RT64 {
+@@ -49,6 +51,6 @@ namespace RT64 {
          // Before the swap chain's framebuffer is set: the bloom passes.
          void prepareBloom(const RenderParams &p);
          void render(const RenderParams &p);
 -        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
-+        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, RenderViewport &viewport, RenderRect &scissor);
++        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, float fillCenterY, RenderViewport &viewport, RenderRect &scissor);
      };
  };
 \ No newline at end of file

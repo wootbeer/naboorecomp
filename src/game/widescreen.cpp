@@ -24,9 +24,14 @@
 extern "C" float rt64_aspect_ratio_scale;
 extern "C" bool rt64_game_widens_projection;
 extern "C" bool rt64_keep_original_aspect;
+extern "C" float rt64_fill_width_center;
 
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
+
+    // Cutscenes fill the window's width, cutting off some of their letterbox. It isn't
+    // centered (the picture is framebuffer lines 55-399 of 448), so neither is the cut.
+    rt64_fill_width_center = 227.5f / 448.0f;
 }
 
 namespace {
