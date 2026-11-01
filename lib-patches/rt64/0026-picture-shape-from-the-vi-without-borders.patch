@@ -1,8 +1,16 @@
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..e3ae06d 100644
+index 2970e71..52da5a7 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
-@@ -1621,6 +1621,7 @@ namespace RT64 {
+@@ -1293,6 +1293,7 @@ namespace RT64 {
+                         drawParams.rasterShaderCache = ext.rasterShaderCache;
+                         drawParams.resolutionScale = resolutionScale;
+                         drawParams.aspectRatioSource = 1.0f;
++                        drawParams.aspectRatioFramebuffer = 1.0f;
+                         drawParams.aspectRatioTarget = 1.0f;
+                         drawParams.extAspectPercentage = 0.0f;
+                         drawParams.horizontalMisalignment = 0.0f;
+@@ -1621,6 +1622,7 @@ namespace RT64 {
  
          if (viHistory.top().vi.visible()) {
              workload.viFbSize = viHistory.top().vi.fbSize();
@@ -61,7 +69,7 @@ index 8ea27d5..b6a8927 100644
          DebuggerCamera debuggerCamera;
          std::multimap<uint32_t, uint32_t> transformIdMap;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..28ea52b 100644
+index 5a331aa..8234c3f 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
 @@ -120,7 +120,7 @@ namespace RT64 {
@@ -73,11 +81,13 @@ index 5a331aa..28ea52b 100644
          const std::scoped_lock lock(ext.sharedResources->configurationMutex);
          const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
          ext.sharedResources->swapChainSizeChanged = false;
-@@ -131,7 +131,14 @@ namespace RT64 {
+@@ -131,7 +131,16 @@ namespace RT64 {
          const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
  
          // Compute the aspect ratio to be used for the frame.
 -        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        workloadConfig.aspectRatioFramebuffer = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++
 +        // The picture's shape on the TV, which isn't the framebuffer's when its pixels aren't
 +        // square (VI::displayAspect).
 +        if (viDisplayAspect > 0.0f) {
@@ -89,7 +99,23 @@ index 5a331aa..28ea52b 100644
  
          const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
          switch (ratioMode) {
-@@ -912,7 +919,7 @@ namespace RT64 {
+@@ -314,6 +323,7 @@ namespace RT64 {
+             projParams.curFrameWeight = curFrameWeight;
+             projParams.prevFrameWeight = prevFrameWeight;
+             projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
++            projParams.pixelAspect = workloadConfig.aspectRatioSource / workloadConfig.aspectRatioFramebuffer;
+             projectionProcessor.process(projParams);
+             projectionProcessor.upload(projParams);
+             uploadProjections = true;
+@@ -628,6 +638,7 @@ namespace RT64 {
+                     drawParams.rasterShaderCache = ext.rasterShaderCache;
+                     drawParams.resolutionScale = fixedResScale;
+                     drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
++                    drawParams.aspectRatioFramebuffer = workloadConfig.aspectRatioFramebuffer;
+                     drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
+                     drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
+                     drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
+@@ -912,7 +923,7 @@ namespace RT64 {
  
                  ElapsedTimer workloadTimer;
                  workloadProfiler.start();
@@ -99,10 +125,20 @@ index 5a331aa..28ea52b 100644
                  // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                  if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
 diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
-index bde2f03..9166fc1 100644
+index bde2f03..87434a8 100644
 --- a/src/hle/rt64_workload_queue.h
 +++ b/src/hle/rt64_workload_queue.h
-@@ -111,7 +111,7 @@ namespace RT64 {
+@@ -52,6 +52,9 @@ namespace RT64 {
+             uint32_t downsampleMultiplier = 1;
+             bool raytracingEnabled = false;
+             float aspectRatioSource = 1.0f;
++            // The framebuffer's own shape (its pixels), which aspectRatioSource isn't when
++            // they aren't square (VI::displayAspect).
++            float aspectRatioFramebuffer = 1.0f;
+             float aspectRatioTarget = 1.0f;
+             float aspectRatioScale = 1.0f;
+             float extAspectPercentage = 1.0f;
+@@ -111,7 +114,7 @@ namespace RT64 {
          void waitForWorkloadId(uint64_t waitId);
          void setup(const External &ext);
          void updateMultisampling();
@@ -111,6 +147,68 @@ index bde2f03..9166fc1 100644
          void threadConfigurationValidate();
          void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
              const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 9fae0d4..3838986 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -1433,7 +1433,8 @@ namespace RT64 {
+ 
+         const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
+         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
+-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
++        // The scissor is in framebuffer pixels, so it's compared with the framebuffer's shape.
++        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioFramebuffer) - 1.0f) < SimilarityPercentage);
+         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
+         InstanceDrawCall instanceDrawCall;
+         interop::RenderIndices renderIndices;
+@@ -1489,7 +1490,8 @@ namespace RT64 {
+                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
+                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
+                 bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+-                bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
++                const float pixelAspect = p.aspectRatioSource / p.aspectRatioFramebuffer;
++                bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) * pixelAspect > intersectionRect.height(true, true));
+                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                 if (useWideViewport) {
+                     projInvRatioScale = 1.0f;
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+index 3add9c3..05d75bd 100644
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -136,6 +136,7 @@ namespace RT64 {
+             RasterShaderCache *rasterShaderCache;
+             hlslpp::float2 resolutionScale;
+             float aspectRatioSource;
++            float aspectRatioFramebuffer;
+             float aspectRatioTarget;
+             float extAspectPercentage;
+             float horizontalMisalignment;
+diff --git a/src/render/rt64_projection_processor.cpp b/src/render/rt64_projection_processor.cpp
+index 2b87d26..0c937b4 100644
+--- a/src/render/rt64_projection_processor.cpp
++++ b/src/render/rt64_projection_processor.cpp
+@@ -121,7 +121,7 @@ namespace RT64 {
+ 
+                 if (!intersectionRect.isEmpty()) {
+                     bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+-                    bool horizontalRatio = (intersectionRect.width(true, true) > intersectionRect.height(true, true));
++                    bool horizontalRatio = (intersectionRect.width(true, true) * p.pixelAspect > intersectionRect.height(true, true));
+                     adjustAspectRatio = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                 }
+             }
+diff --git a/src/render/rt64_projection_processor.h b/src/render/rt64_projection_processor.h
+index 5bc3a2a..3742420 100644
+--- a/src/render/rt64_projection_processor.h
++++ b/src/render/rt64_projection_processor.h
+@@ -21,6 +21,8 @@ namespace RT64 {
+             float curFrameWeight = 1.0f;
+             float prevFrameWeight = 0.0f;
+             float aspectRatioScale = 1.0f;
++            // How much wider than tall the framebuffer's pixels are on screen.
++            float pixelAspect = 1.0f;
+         };
+ 
+         ProjectionProcessor();
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
 index 0a06d10..d4b1f9a 100644
 --- a/src/render/rt64_vi_renderer.cpp

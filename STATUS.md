@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 21)
+## Overview (as of round 22)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,32 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-01, round 22: widescreen that widens, and a HUD that lines up
+
+**The radar's two halves came apart in widescreen** (the ring one way, the
+map another), and the side icons moved out. Measured against "Original":
+everything drawn in 3D, HUD included, was 1.25x wider and further out, and
+only the 2D rectangles (the radar's map) stayed put. The 16:9 picture of
+round 20 was the 4:3 one stretched, not widened. Two of RT64's tests had
+kept the framebuffer's square-pixel shape that round 20's
+`aspectRatioSource` replaced with the TV's (`lib-patches/rt64/0026`):
+
+- `FramebufferRenderer` widens a frame only if its scissor is close to the
+  source shape. The scissor is in framebuffer pixels (400x444 here), so it
+  never matched 1.43, and nothing was widened: no projection, no viewport,
+  no rectangle. It's now compared with the framebuffer's own shape
+  (`aspectRatioFramebuffer`, from the VI as before).
+- A 3D view is widened (its projection, not just its viewport) only if
+  its viewport is wider than tall, in pixels. Naboo's 400x444 view isn't,
+  in pixels, though it's 1.43 on screen; both checks (`ProjectionProcessor`,
+  `FramebufferRenderer`) now scale the width by the pixels' shape.
+
+After: the street widens to 16:9 with the speeder the same size as in 4:3,
+and the HUD (drawn in 3D in small viewports, which are rightly left alone,
+and 2D rectangles) keeps its 4:3 layout in the middle, the radar's map back
+in its ring. The objects missing at the sides are the game's own culling,
+next.
 
 ## 2026-10-31, round 21: noise at craft select (lost stream reads); a reference from mupen
 
