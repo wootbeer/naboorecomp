@@ -67,8 +67,31 @@ kept the framebuffer's square-pixel shape that round 20's
 After: the street widens to 16:9 with the speeder the same size as in 4:3,
 and the HUD (drawn in 3D in small viewports, which are rightly left alone,
 and 2D rectangles) keeps its 4:3 layout in the middle, the radar's map back
-in its ring. The objects missing at the sides are the game's own culling,
-next.
+in its ring.
+
+**Walls missing in the wider view** (slots of sky between buildings, even
+well inside the old 4:3 area). Widening only in RT64 means the game, and
+the RSP's clipping, still see a 4:3 camera. So the camera's projection is
+now widened game-side: `func_4001A078` builds it (matrix, fov, aspect, near,
+far), and a hook multiplies the aspect by RT64's factor when the matrix is
+the camera's (0x4007D9B0); RT64 is told not to widen it again
+(`rt64_game_widens_projection`, `rt64_aspect_ratio_scale` in
+`lib-patches/rt64/0026`). The view widened, but the slots stayed.
+
+They were scissors. With the picture stretched (16:9 output, 4:3 camera)
+there were none, and every triangle went through the 3D hooks, so it wasn't
+RT64 losing them. `func_4000BB00` writes an RDP scissor from a rectangle in
+-1..1 screen units, and giving it the whole screen made the slots go. The
+rectangles are per cell of the level (array at the pointer in 0x40060054):
+`func_410112B0` walks the level's portals from the camera, growing each
+visible cell's rectangle, and the objects in a cell are drawn scissored to
+it. It projects with its own numbers: cot(fov/2) at 0x40060060 and a
+horizontal scale (1/aspect, from the 4:3 screen) at 0x40060064
+(`func_41013DAC`: x * cot/z * [0x40060064] against the rectangle's x, y *
+cot/z against its y). A hook just after it's set (0x41011648) divides that
+scale by the same factor (`src/game/widescreen.cpp`), and the cell
+rectangles match the wide camera: the street at the start of the first
+mission now looks as in 4:3, with more of it at the sides.
 
 ## 2026-10-31, round 21: noise at craft select (lost stream reads); a reference from mupen
 

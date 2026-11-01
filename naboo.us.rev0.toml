@@ -104,6 +104,15 @@ func = "func_4100096C"
 before_vram = 0x41001028
 text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
 
+# func_4001A078 builds a perspective matrix (matrix, fov, aspect, near, far);
+# the camera's (at 0x4007D9B0) is widened for widescreen here, so that the
+# RSP's clipping and the objects' own matrices keep what's at the sides
+# (src/game/widescreen.cpp, STATUS.md round 22).
+[[patches.hook]]
+func = "func_4001A078"
+before_vram = 0x4001A078
+text = "    { extern void naboo_widen_projection(uint8_t *rdram, recomp_context *ctx); naboo_widen_projection(rdram, ctx); }"
+
 # func_400236E4 has no return: on the N64 it runs straight on into
 # func_40023734, which is also called on its own. Recompiled functions don't
 # fall through into the next one, so do it here (from its last instruction).
@@ -311,3 +320,15 @@ value = 0x3C1F410E
 func = "func_410DA0A4"
 vram = 0x410DA174
 value = 0x27FFA178
+
+
+# func_410112B0 walks the level's portals from the camera, keeping a screen
+# rectangle for each cell that it later uses as the scissor for what's drawn in
+# that cell. Here it has just worked out the horizontal scale of its own
+# projection (0x40060064, from the 4:3 screen); for widescreen it's narrowed by
+# the same factor as the camera's (src/game/widescreen.cpp, STATUS.md round 22),
+# or walls past the 4:3 cell rectangles are cut off.
+[[patches.hook]]
+func = "func_410112B0"
+before_vram = 0x41011648
+text = "    { extern void naboo_widen_portals(uint8_t *rdram); naboo_widen_portals(rdram); }"

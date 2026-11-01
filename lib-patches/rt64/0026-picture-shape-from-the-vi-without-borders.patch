@@ -69,10 +69,22 @@ index 8ea27d5..b6a8927 100644
          DebuggerCamera debuggerCamera;
          std::multimap<uint32_t, uint32_t> transformIdMap;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..8234c3f 100644
+index 5a331aa..a1afc67 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -120,7 +120,7 @@ namespace RT64 {
+@@ -10,6 +10,11 @@
+ 
+ #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+ 
++// How much wider than the original the picture is drawn (1 when it isn't), for a game that
++// widens its own 3D camera: Battle for Naboo's culling follows its projection, so the port
++// widens that (see rt64_game_widens_projection).
++extern "C" float rt64_aspect_ratio_scale = 1.0f;
++
+ namespace RT64 {
+     // WorkloadQueue
+ 
+@@ -120,7 +125,7 @@ namespace RT64 {
          framebufferRenderer->updateMultisampling();
      }
  
@@ -81,7 +93,7 @@ index 5a331aa..8234c3f 100644
          const std::scoped_lock lock(ext.sharedResources->configurationMutex);
          const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
          ext.sharedResources->swapChainSizeChanged = false;
-@@ -131,7 +131,16 @@ namespace RT64 {
+@@ -131,7 +136,16 @@ namespace RT64 {
          const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
  
          // Compute the aspect ratio to be used for the frame.
@@ -99,7 +111,15 @@ index 5a331aa..8234c3f 100644
  
          const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
          switch (ratioMode) {
-@@ -314,6 +323,7 @@ namespace RT64 {
+@@ -208,6 +222,7 @@ namespace RT64 {
+ 
+         // Build the resolution scale vector from the configuration.
+         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
++        rt64_aspect_ratio_scale = workloadConfig.aspectRatioScale;
+         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
+         workloadConfig.downsampleMultiplier = ext.sharedResources->userConfig.downsampleMultiplier;
+         ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+@@ -314,6 +329,7 @@ namespace RT64 {
              projParams.curFrameWeight = curFrameWeight;
              projParams.prevFrameWeight = prevFrameWeight;
              projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
@@ -107,7 +127,7 @@ index 5a331aa..8234c3f 100644
              projectionProcessor.process(projParams);
              projectionProcessor.upload(projParams);
              uploadProjections = true;
-@@ -628,6 +638,7 @@ namespace RT64 {
+@@ -628,6 +644,7 @@ namespace RT64 {
                      drawParams.rasterShaderCache = ext.rasterShaderCache;
                      drawParams.resolutionScale = fixedResScale;
                      drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
@@ -115,7 +135,7 @@ index 5a331aa..8234c3f 100644
                      drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
                      drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
                      drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
-@@ -912,7 +923,7 @@ namespace RT64 {
+@@ -912,7 +929,7 @@ namespace RT64 {
  
                  ElapsedTimer workloadTimer;
                  workloadProfiler.start();
@@ -184,10 +204,20 @@ index 3add9c3..05d75bd 100644
              float extAspectPercentage;
              float horizontalMisalignment;
 diff --git a/src/render/rt64_projection_processor.cpp b/src/render/rt64_projection_processor.cpp
-index 2b87d26..0c937b4 100644
+index 2b87d26..ec2c8ea 100644
 --- a/src/render/rt64_projection_processor.cpp
 +++ b/src/render/rt64_projection_processor.cpp
-@@ -121,7 +121,7 @@ namespace RT64 {
+@@ -7,6 +7,9 @@
+ #include "common/rt64_math.h"
+ #include "hle/rt64_workload_queue.h"
+ 
++// Set by a game that widens its own 3D projection for widescreen (Battle for Naboo).
++extern "C" bool rt64_game_widens_projection = false;
++
+ namespace RT64 {
+     inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
+         matrix[0][0] *= aspectRatioScale;
+@@ -121,12 +124,14 @@ namespace RT64 {
  
                  if (!intersectionRect.isEmpty()) {
                      bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
@@ -196,6 +226,14 @@ index 2b87d26..0c937b4 100644
                      adjustAspectRatio = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                  }
              }
+  
+-            float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
++            // A game that widens its own projection (by rt64_aspect_ratio_scale) for the views
++            // drawn wide gets the wide viewport without its projection being widened again.
++            float projRatioScale = (adjustAspectRatio && !rt64_game_widens_projection) ? (1.0f / p.aspectRatioScale) : 1.0f;
+             interop::float4x4 &viewMatrix = drawData.modViewTransforms[proj.transformsIndex];
+             interop::float4x4 &projMatrix = drawData.modProjTransforms[proj.transformsIndex];
+             interop::float4x4 &viewProjMatrix = drawData.modViewProjTransforms[proj.transformsIndex];
 diff --git a/src/render/rt64_projection_processor.h b/src/render/rt64_projection_processor.h
 index 5bc3a2a..3742420 100644
 --- a/src/render/rt64_projection_processor.h
