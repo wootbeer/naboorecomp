@@ -17,6 +17,7 @@
 // (0x4005C84C = 7) nothing is widened, and RT64 shows those frames at their original
 // shape (rt64_keep_original_aspect, lib-patches/rt64/0026).
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "recomp.h"
@@ -90,4 +91,22 @@ extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr address) {
     }
 
     MEM_W(0, address) = (int32_t)to_bits(to_float((uint32_t)MEM_W(0, address)) * scale);
+}
+
+// A cell rectangle the scissor is made from (func_4000BB00's a1) must be in RAM: KSEG0, or
+// the mapped segments at 0x40000000/0x41000000 (all within the 8 MB). Otherwise the whole
+// screen's rectangle is used instead, and the bad pointer reported once.
+extern "C" void naboo_check_scissor_rect(uint8_t* rdram, recomp_context* ctx) {
+    (void)rdram;
+    const uint32_t rect = (uint32_t)ctx->r5;
+    const uint32_t region = rect & 0xFF000000u;
+    const bool in_ram = ((region == 0x80000000u) || (region == 0x40000000u) || (region == 0x41000000u)) && ((rect & 0x00FFFFFFu) < 0x00800000u) && ((rect & 3u) == 0);
+    if (!in_ram) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            fprintf(stderr, "[NABOO] func_4000BB00 given cell rectangle at %08X (ra %08X), using the whole screen\n", rect, (uint32_t)ctx->r31);
+        }
+        ctx->r5 = (gpr)(int32_t)0x4004CD28;
+    }
 }

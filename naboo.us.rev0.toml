@@ -342,3 +342,12 @@ text = "    { extern void naboo_widen_portals(uint8_t *rdram); naboo_widen_porta
 func = "func_41024064"
 before_vram = 0x41024170
 text = "    { extern void naboo_widen_terrain(uint8_t *rdram, gpr address); naboo_widen_terrain(rdram, ctx->r29 + 0x50); }"
+
+# func_4000BB00 writes a scissor from a cell's screen rectangle (a1). Rarely, in
+# open levels, it has been handed a pointer that isn't in RAM, and the game
+# crashed or froze (STATUS.md round 22). Until the cause is found, such a
+# rectangle is replaced by the whole screen's (0x4004CD28) and reported once.
+[[patches.hook]]
+func = "func_4000BB00"
+before_vram = 0x4000BB00
+text = "    { extern void naboo_check_scissor_rect(uint8_t *rdram, recomp_context *ctx); naboo_check_scissor_rect(rdram, ctx); }"

@@ -135,6 +135,15 @@ widened first: they aren't it, three times wider changed nothing; the
 microcode drops nothing at the edges, every triangle goes through the 3D
 hooks.)
 
+**A rare crash in level 2** (user: everything froze while flying). Here,
+once in six five-minute runs: a segfault in `func_4000BB00` reading N64
+address 0xA0000000, i.e. it was handed a cell rectangle pointer that isn't
+in RAM (its callers do check for null). The DL chunk pool never ran low
+(at least ~1000 of its chunks free). Cause not found; a hook before it now
+replaces a rectangle pointer outside RAM with the whole screen's
+(0x4004CD28) and reports it once (`[NABOO] func_4000BB00 given cell
+rectangle at ...`), so the game carries on and the log shows the value.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole
