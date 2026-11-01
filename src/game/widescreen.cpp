@@ -9,6 +9,11 @@
 // rectangle for each cell it can see into, and scissors what's drawn in the cell to it. Its
 // horizontal scale (0x40060064) is narrowed by the same factor, or the cell rectangles stay
 // 4:3 and cut walls off in the wider picture.
+//
+// Cutscenes stay 4:3. Their levels are built only as far as the 4:3 camera sees (past
+// the sides there's sky, or nothing), so while the game is in its cinematic mode
+// (0x4005C84C = 7) nothing is widened, and RT64 shows those frames at their original
+// shape (rt64_keep_original_aspect, lib-patches/rt64/0026).
 #include <cstdint>
 #include <cstring>
 
@@ -16,12 +21,17 @@
 
 extern "C" float rt64_aspect_ratio_scale;
 extern "C" bool rt64_game_widens_projection;
+extern "C" bool rt64_keep_original_aspect;
 
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
 }
 
 namespace {
+    bool in_cutscene(uint8_t* rdram) {
+        return MEM_W(0, (gpr)(int32_t)0x4005C84C) == 7;
+    }
+
     float widescreen_scale() {
         const float scale = rt64_aspect_ratio_scale;
         return (scale > 1.0f) ? scale : 1.0f;
@@ -41,9 +51,15 @@ namespace {
 }
 
 extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
-    (void)rdram;
+    if ((uint32_t)ctx->r4 != 0x4007D9B0) {
+        return;
+    }
+
+    // Built once a frame, before its display list goes to RT64.
+    const bool cutscene = in_cutscene(rdram);
+    rt64_keep_original_aspect = cutscene;
     const float scale = widescreen_scale();
-    if (((uint32_t)ctx->r4 != 0x4007D9B0) || (scale == 1.0f)) {
+    if (cutscene || (scale == 1.0f)) {
         return;
     }
 
@@ -52,7 +68,7 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
 
 extern "C" void naboo_widen_portals(uint8_t* rdram) {
     const float scale = widescreen_scale();
-    if (scale == 1.0f) {
+    if (in_cutscene(rdram) || (scale == 1.0f)) {
         return;
     }
 

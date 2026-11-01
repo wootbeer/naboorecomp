@@ -93,12 +93,27 @@ scale by the same factor (`src/game/widescreen.cpp`), and the cell
 rectangles match the wide camera: the street at the start of the first
 mission now looks as in 4:3, with more of it at the sides.
 
-**What's left at the sides.** In the mission's opening cutscene and its
-first seconds, some of the extra strip at the sides is black (no wall, no
-sky). Every such area is outside what 4:3 shows at the same moment; it stays
-with every scissor set to the whole screen and doesn't follow the portal
-scale, so as far as can be told the level has nothing built there (a 4:3
-camera never sees it). Left as is.
+**What's left at the sides: the level isn't built there.** In the mission's
+opening cutscene a wall piece at the right edge was missing (sky through a
+slot) as the camera panned. Not scissors (every scissor set to the whole
+screen), not the portal walk (scale doubled), not the game's object tests
+(`func_41013AD8`/`func_41013DAC` forced visible), not its aspect setting
+(0x40075A7C), and not the microcode (no edge excess among the triangles it
+drops that are on screen; its own RDP triangles miss it too): the game
+never sends it. Widening the camera's fov instead (tan x1.4 on the view at
+0x4004C67C, fov 45 in cutscenes, 75 in play) settled it: the zoomed-out view
+shows the building just ending, sky and hills beyond, and no ground under
+the street. The level is a set, built as far as the 4:3 camera sees.
+
+So **cutscenes stay 4:3**. While the game is in its cinematic mode (the word
+at 0x4005C84C is 7, from the mission intro until play starts) the camera and
+portal walk aren't widened, and RT64 shows those frames at their original
+shape with side bars (`rt64_keep_original_aspect`, carried in each workload
+as `keepOriginalAspect` and applied in `threadConfigurationUpdate`,
+`lib-patches/rt64/0026`; the game still sees the configured widening in
+`rt64_aspect_ratio_scale`). Play stays widescreen. Black areas remain at the
+start of play where the camera begins beside unbuilt parts of the level, for
+a second or two.
 
 **A dark line along the right edge** (and the bottom, at some window
 sizes). The VI shows all 400 columns of the framebuffer (640 dots at 0.625),

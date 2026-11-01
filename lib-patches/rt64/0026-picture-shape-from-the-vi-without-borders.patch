@@ -1,8 +1,19 @@
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..52da5a7 100644
+index 2970e71..eb4a116 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
-@@ -1293,6 +1293,7 @@ namespace RT64 {
+@@ -27,6 +27,10 @@
+ #define MI_INTR_DP          0x00000020
+ #define MI_INTR_SP          0x00000001
+ 
++// Set by a game for frames to be shown at their original shape, such as cutscenes
++// framed for 4:3 (see Workload::keepOriginalAspect).
++extern "C" bool rt64_keep_original_aspect;
++
+ namespace RT64 {
+     const float ShiftScaleMap[] = {
+         1.0f,
+@@ -1293,6 +1297,7 @@ namespace RT64 {
                          drawParams.rasterShaderCache = ext.rasterShaderCache;
                          drawParams.resolutionScale = resolutionScale;
                          drawParams.aspectRatioSource = 1.0f;
@@ -10,14 +21,18 @@ index 2970e71..52da5a7 100644
                          drawParams.aspectRatioTarget = 1.0f;
                          drawParams.extAspectPercentage = 0.0f;
                          drawParams.horizontalMisalignment = 0.0f;
-@@ -1621,6 +1622,7 @@ namespace RT64 {
+@@ -1621,8 +1626,11 @@ namespace RT64 {
  
          if (viHistory.top().vi.visible()) {
              workload.viFbSize = viHistory.top().vi.fbSize();
 +            workload.viDisplayAspect = viHistory.top().vi.displayAspect();
          }
  
++        workload.keepOriginalAspect = rt64_keep_original_aspect;
++
          // Log and reset profilers.
+         dlCpuProfiler.end();
+         dlCpuProfiler.log();
 diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
 index 3c50c57..3ad8e60 100644
 --- a/src/hle/rt64_vi.cpp
@@ -57,22 +72,26 @@ index 5b70e01..75aa855 100644
          float xOffsetFloat() const;
          float yScaleFloat() const;
 diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
-index 8ea27d5..b6a8927 100644
+index 8ea27d5..53dc20b 100644
 --- a/src/hle/rt64_workload.h
 +++ b/src/hle/rt64_workload.h
-@@ -226,6 +226,7 @@ namespace RT64 {
+@@ -226,6 +226,11 @@ namespace RT64 {
          FramebufferStorage fbStorage;
          uint32_t viOriginalRate;
          hlslpp::uint2 viFbSize = {};
 +        float viDisplayAspect = 0.0f;
++
++        // Shown at the picture's original shape, whatever the aspect ratio setting
++        // (rt64_keep_original_aspect, when the frame was made).
++        bool keepOriginalAspect = false;
          DebuggerRenderer debuggerRenderer;
          DebuggerCamera debuggerCamera;
          std::multimap<uint32_t, uint32_t> transformIdMap;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..a1afc67 100644
+index 5a331aa..d4e278a 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -10,6 +10,11 @@
+@@ -10,6 +10,12 @@
  
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
@@ -80,20 +99,21 @@ index 5a331aa..a1afc67 100644
 +// widens its own 3D camera: Battle for Naboo's culling follows its projection, so the port
 +// widens that (see rt64_game_widens_projection).
 +extern "C" float rt64_aspect_ratio_scale = 1.0f;
++extern "C" bool rt64_keep_original_aspect = false;
 +
  namespace RT64 {
      // WorkloadQueue
  
-@@ -120,7 +125,7 @@ namespace RT64 {
+@@ -120,7 +126,7 @@ namespace RT64 {
          framebufferRenderer->updateMultisampling();
      }
  
 -    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
-+    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, WorkloadConfiguration &workloadConfig) {
++    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, bool keepOriginalAspect, WorkloadConfiguration &workloadConfig) {
          const std::scoped_lock lock(ext.sharedResources->configurationMutex);
          const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
          ext.sharedResources->swapChainSizeChanged = false;
-@@ -131,7 +136,16 @@ namespace RT64 {
+@@ -131,7 +137,16 @@ namespace RT64 {
          const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
  
          // Compute the aspect ratio to be used for the frame.
@@ -111,15 +131,23 @@ index 5a331aa..a1afc67 100644
  
          const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
          switch (ratioMode) {
-@@ -208,6 +222,7 @@ namespace RT64 {
+@@ -208,6 +223,15 @@ namespace RT64 {
  
          // Build the resolution scale vector from the configuration.
          workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
 +        rt64_aspect_ratio_scale = workloadConfig.aspectRatioScale;
++
++        // The game still learns the configured widening above, for the frames it does widen.
++        if (keepOriginalAspect) {
++            workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
++            workloadConfig.aspectRatioScale = 1.0f;
++            workloadConfig.extAspectPercentage = 0.0f;
++        }
++
          workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
          workloadConfig.downsampleMultiplier = ext.sharedResources->userConfig.downsampleMultiplier;
          ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
-@@ -314,6 +329,7 @@ namespace RT64 {
+@@ -314,6 +338,7 @@ namespace RT64 {
              projParams.curFrameWeight = curFrameWeight;
              projParams.prevFrameWeight = prevFrameWeight;
              projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
@@ -127,7 +155,7 @@ index 5a331aa..a1afc67 100644
              projectionProcessor.process(projParams);
              projectionProcessor.upload(projParams);
              uploadProjections = true;
-@@ -628,6 +644,7 @@ namespace RT64 {
+@@ -628,6 +653,7 @@ namespace RT64 {
                      drawParams.rasterShaderCache = ext.rasterShaderCache;
                      drawParams.resolutionScale = fixedResScale;
                      drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
@@ -135,17 +163,17 @@ index 5a331aa..a1afc67 100644
                      drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
                      drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
                      drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
-@@ -912,7 +929,7 @@ namespace RT64 {
+@@ -912,7 +938,7 @@ namespace RT64 {
  
                  ElapsedTimer workloadTimer;
                  workloadProfiler.start();
 -                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
-+                threadConfigurationUpdate(workload.viFbSize, workload.viDisplayAspect, workloadConfig);
++                threadConfigurationUpdate(workload.viFbSize, workload.viDisplayAspect, workload.keepOriginalAspect, workloadConfig);
  
                  // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                  if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
 diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
-index bde2f03..87434a8 100644
+index bde2f03..a718422 100644
 --- a/src/hle/rt64_workload_queue.h
 +++ b/src/hle/rt64_workload_queue.h
 @@ -52,6 +52,9 @@ namespace RT64 {
@@ -163,7 +191,7 @@ index bde2f03..87434a8 100644
          void setup(const External &ext);
          void updateMultisampling();
 -        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);
-+        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, WorkloadConfiguration &workloadConfig);
++        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viDisplayAspect, bool keepOriginalAspect, WorkloadConfiguration &workloadConfig);
          void threadConfigurationValidate();
          void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
              const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
