@@ -332,3 +332,17 @@ value = 0x27FFA178
 func = "func_410112B0"
 before_vram = 0x41011648
 text = "    { extern void naboo_widen_portals(uint8_t *rdram); naboo_widen_portals(rdram); }"
+
+# The terrain's view frustum, from the camera's fov and its viewport's 4:3 shape:
+# func_410232A8 and func_410239E4 keep the frustum's horizontal corner on the stack
+# (sp + 0x58, sp + 0x90); widened here like the camera, or terrain past the 4:3
+# sides isn't made (src/game/widescreen.cpp, STATUS.md round 22).
+[[patches.hook]]
+func = "func_410232A8"
+before_vram = 0x41023400
+text = "    { extern void naboo_widen_terrain(uint8_t *rdram, gpr address); naboo_widen_terrain(rdram, ctx->r29 + 0x58); }"
+
+[[patches.hook]]
+func = "func_410239E4"
+before_vram = 0x41023B50
+text = "    { extern void naboo_widen_terrain(uint8_t *rdram, gpr address); naboo_widen_terrain(rdram, ctx->r29 + 0x90); }"

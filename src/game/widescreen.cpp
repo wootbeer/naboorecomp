@@ -8,7 +8,9 @@
 // The level's portal walk (func_410112B0) has a projection of its own: it keeps a screen
 // rectangle for each cell it can see into, and scissors what's drawn in the cell to it. Its
 // horizontal scale (0x40060064) is narrowed by the same factor, or the cell rectangles stay
-// 4:3 and cut walls off in the wider picture.
+// 4:3 and cut walls off in the wider picture. Open levels' terrain is made for a view
+// frustum of its own (func_410232A8, func_410239E4), whose horizontal corner is widened
+// the same way.
 //
 // Cutscenes stay 4:3. Their levels are built only as far as the 4:3 camera sees (past
 // the sides there's sky, or nothing), so while the game is in its cinematic mode
@@ -74,4 +76,13 @@ extern "C" void naboo_widen_portals(uint8_t* rdram) {
 
     const gpr address = (gpr)(int32_t)0x40060064;
     MEM_W(0, address) = (int32_t)to_bits(to_float((uint32_t)MEM_W(0, address)) / scale);
+}
+
+extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr address) {
+    const float scale = widescreen_scale();
+    if (in_cutscene(rdram) || (scale == 1.0f)) {
+        return;
+    }
+
+    MEM_W(0, address) = (int32_t)to_bits(to_float((uint32_t)MEM_W(0, address)) * scale);
 }

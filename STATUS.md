@@ -119,6 +119,25 @@ with no sides to show. Play stays widescreen. Black areas remain at the
 start of play where the camera begins beside unbuilt parts of the level, for
 a second or two.
 
+**Terrain at the sides in open levels** (user's clip of the swamp escort:
+the hills end in jagged edges at the sides). Terrain is made for a view
+frustum of its own: `func_410232A8` and `func_410239E4` read the camera
+(0x4004C67C: fov at 0x18, viewport 400x448 at 0x10) and build a frustum
+corner on the stack, its horizontal half from the viewport's 4:3 shape
+(sp + 0x58 and sp + 0x90). Hooks just after (0x41023400, 0x41023B50) widen
+it by the same factor as the camera (`naboo_widen_terrain`). Not yet seen
+working: only the first mission is reachable here (setting the level byte,
+0x4004CB86, before it loads gives a broken level or a hang).
+
+**Still open:** a column of stray pixels on 640-wide 2D screens ("A long
+time ago...", mission complete), at about x = 620 of 640, in the black frames
+between screens. Those frames are drawn by the RDP (a fill over the whole
+buffer, scissor 0-639), not shown from RDRAM; where the column comes from
+isn't known yet. And loud moments clip: the game's own mix reaches full
+scale (the crawl's theme: up to 109 clipped samples a second), as it does on
+mupen64plus (ref4.raw: 399 in its loudest second), so it's the game's, not
+the port's audio path (no drops or underruns in the queue meanwhile).
+
 **A dark line along the right edge** (and the bottom, at some window
 sizes). The VI shows all 400 columns of the framebuffer (640 dots at 0.625),
 but the game's scissor ends a column short, so the last column is never
