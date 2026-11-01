@@ -111,7 +111,11 @@ portal walk aren't widened, and RT64 shows those frames at their original
 shape with side bars (`rt64_keep_original_aspect`, carried in each workload
 as `keepOriginalAspect` and applied in `threadConfigurationUpdate`,
 `lib-patches/rt64/0026`; the game still sees the configured widening in
-`rt64_aspect_ratio_scale`). Play stays widescreen. Black areas remain at the
+`rt64_aspect_ratio_scale`). They fill the window's width, cut off at the
+top and bottom (`Present::fillWidth`, `VIRenderer::getViewportAndScissor`):
+only letterbox is cut (the bars are 44 and 39 of 360 lines at 4:3, the zoom
+takes 44 from each side at 16:9), so the picture's as large as it can be
+with no sides to show. Play stays widescreen. Black areas remain at the
 start of play where the camera begins beside unbuilt parts of the level, for
 a second or two.
 

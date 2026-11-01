@@ -1,5 +1,32 @@
+diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
+index e1889e5..cabfc42 100644
+--- a/src/hle/rt64_present.h
++++ b/src/hle/rt64_present.h
+@@ -21,6 +21,10 @@ namespace RT64 {
+         std::vector<FramebufferOperation> fbOperations;
+         DebuggerFramebuffer debuggerFramebuffer;
+         bool paused = false;
++
++        // Shown filling the window's width, cropping the top and bottom (a frame kept at its
++        // original shape, rt64_keep_original_aspect: cutscenes, whose letterbox is cropped).
++        bool fillWidth = false;
+         uint64_t presentId = 0;
+         uint64_t workloadId = 0;
+     };
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 5f434ad..194cf0c 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -324,6 +324,7 @@ namespace RT64 {
+                     renderParams.filtering = filtering;
+                     renderParams.vi = &present.screenVI;
+                     renderParams.removeBlackBorders = removeBlackBorders;
++                    renderParams.fillWidth = present.fillWidth;
+ 
+                     const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
+                     if (useDownsampling) {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..eb4a116 100644
+index 2970e71..7d14561 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
 @@ -27,6 +27,10 @@
@@ -33,6 +60,23 @@ index 2970e71..eb4a116 100644
          // Log and reset profilers.
          dlCpuProfiler.end();
          dlCpuProfiler.log();
+@@ -1951,6 +1959,7 @@ namespace RT64 {
+         if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
+             // Push a new renderer event to the timeline for presenting this VI.
+             present.screenVI = newVI;
++            present.fillWidth = rt64_keep_original_aspect;
+             advancePresent(present, false);
+             ext.presentQueue->advanceToNextPresent();
+ 
+@@ -2069,7 +2078,7 @@ namespace RT64 {
+             ext.sharedQueueResources->configurationMutex.unlock();
+             RenderViewport viewport;
+             RenderRect scissor;
+-            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, viewport, scissor);
++            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, false, viewport, scissor);
+ 
+             // Convert the mouse coordinates to native coordinates.
+             hlslpp::float2 screenCursorPos;
 diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
 index 3c50c57..3ad8e60 100644
 --- a/src/hle/rt64_vi.cpp
@@ -276,10 +320,28 @@ index 5bc3a2a..3742420 100644
  
          ProjectionProcessor();
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
-index 0a06d10..b7f48b7 100644
+index 0a06d10..a650882 100644
 --- a/src/render/rt64_vi_renderer.cpp
 +++ b/src/render/rt64_vi_renderer.cpp
-@@ -262,22 +262,40 @@ namespace RT64 {
+@@ -214,7 +214,7 @@ namespace RT64 {
+ 
+         RenderViewport viewport;
+         RenderRect scissor;
+-        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.fillWidth, viewport, scissor);
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 
+@@ -244,7 +244,7 @@ namespace RT64 {
+         p.commandList->drawInstanced(3, 1, 0, 0);
+     }
+ 
+-    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
++    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, RenderViewport &viewport, RenderRect &scissor) {
+         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
+         //
+         // VideoSD: This corresponds to the SD TV Scanline space, which is what the VI natively works on.
+@@ -262,22 +262,52 @@ namespace RT64 {
          const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
          const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
  
@@ -295,6 +357,12 @@ index 0a06d10..b7f48b7 100644
 +        auto toWindow = [&](float x, float y) {
 +            hlslpp::float2 hd = fromSDtoHD({ x, y }, sdSize, hdSize);
 +            hd.x *= xStretch;
++            if (fillWidth && (fitSize.x > 0.0f)) {
++                // Scaled to the window's width, centered; what's past the top and bottom is cut off.
++                const float relativeScale = windowSize.x / fitSize.x;
++                return hlslpp::float2(windowSize.x / 2.0f + (hd.x - fitSize.x / 2.0f) * relativeScale, windowSize.y / 2.0f + (hd.y - fitSize.y / 2.0f) * relativeScale);
++            }
++
 +            return fromHDtoWindow(hd, fitSize, windowSize);
 +        };
 +
@@ -327,6 +395,33 @@ index 0a06d10..b7f48b7 100644
 +            viewport.height *= float(fbSize.y) / (float(fbSize.y) - 1.0f);
 +        }
          scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
++        if (fillWidth) {
++            scissor.top = std::max(scissor.top, 0);
++            scissor.bottom = std::min(scissor.bottom, int32_t(windowSize.y));
++            scissor.left = std::max(scissor.left, 0);
++            scissor.right = std::min(scissor.right, int32_t(windowSize.x));
++        }
      }
+ };
+\ No newline at end of file
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index ad7a7b4..ad724f8 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -42,6 +42,7 @@ namespace RT64 {
+             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
+             const VI *vi = nullptr;
+             bool removeBlackBorders = false;
++            bool fillWidth = false;
+         };
+ 
+         VIRenderer();
+@@ -49,6 +50,6 @@ namespace RT64 {
+         // Before the swap chain's framebuffer is set: the bloom passes.
+         void prepareBloom(const RenderParams &p);
+         void render(const RenderParams &p);
+-        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
++        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool fillWidth, RenderViewport &viewport, RenderRect &scissor);
+     };
  };
 \ No newline at end of file
