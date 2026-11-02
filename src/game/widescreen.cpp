@@ -26,6 +26,7 @@ extern "C" float rt64_aspect_ratio_scale;
 extern "C" bool rt64_game_widens_projection;
 extern "C" bool rt64_keep_original_aspect;
 extern "C" float rt64_fill_width_center;
+extern "C" uint32_t rt64_auto_anchor_fb_width;
 
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
@@ -66,6 +67,12 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     // Built once a frame, before its display list goes to RT64.
     const bool cutscene = in_cutscene(rdram);
     rt64_keep_original_aspect = cutscene;
+
+    // In play (the mode word is 0; 5 paused, 7 cinematic) the HUD, drawn in the 400-wide
+    // framebuffer, is anchored to the sides for the HUD setting to spread it out
+    // (lib-patches/rt64/0026, rt64_auto_anchor_fb_width). Not paused: the pause menu's text
+    // is drawn a letter at a time, and would come apart.
+    rt64_auto_anchor_fb_width = (MEM_W(0, (gpr)(int32_t)0x4005C84C) == 0) ? 400 : 0;
     const float scale = widescreen_scale();
     if (cutscene || (scale == 1.0f)) {
         return;

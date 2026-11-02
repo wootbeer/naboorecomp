@@ -144,6 +144,28 @@ replaces a rectangle pointer outside RAM with the whole screen's
 (0x4004CD28) and reports it once (`[NABOO] func_4000BB00 given cell
 rectangle at ...`), so the game carries on and the log shows the value.
 
+**An expanded HUD** (the HUD setting did nothing: RT64 moves HUD pieces to
+the sides only when a game anchors them with the extended GBI, which Naboo
+doesn't). RT64 now anchors them itself while the game asks
+(`rt64_auto_anchor_fb_width`, set to 400, the in-game framebuffer's width,
+while the mode word at 0x4005C84C is 0; it's 5 paused, 7 cinematic):
+
+- Texture rectangles without depth (the HUD's are; the world's sprites are
+  depth tested) a third of the way in from either side are drawn anchored to
+  that side (`RDP::drawTexRect`), given relative to it so they land where the
+  game put them, with the scissor's sides anchored meanwhile (or the 4:3
+  scissor cut them off). Their regions are kept, this frame and the last.
+- The radar's ring is a 3D model drawn in front of the camera, with depth,
+  in the full viewport; what places it is that its origin lands in the radar
+  map's anchored region (`RDP::autoAnchorAt`). Such a model is moved across
+  in clip space by as much as the rectangles are
+  (`x += pct * (1 - 1/scale) * w`, `rt64_ext_aspect_percentage` from the HUD
+  setting), so the ring stays on its map. Anchoring 3D models by position
+  alone moved sky and world pieces (many are drawn without depth), and
+  viewport anchors don't suit models in the full viewport.
+- Not while paused: the pause menu's text is drawn a letter at a time, and
+  letters near the sides came apart.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole

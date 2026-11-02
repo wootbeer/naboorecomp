@@ -1,3 +1,70 @@
+diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
+index 9208da1..188392f 100644
+--- a/src/gbi/rt64_gbi_f3dnaboo.cpp
++++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
+@@ -23,6 +23,12 @@
+ // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
+ // independent implementation for RT64 that follows that description.
+ 
++// The framebuffer width a game's HUD is drawn at, for RT64 to anchor the HUD's pieces to the
++// sides of a wider picture (0: none). Set by the game for its in-game frames.
++extern "C" uint32_t rt64_auto_anchor_fb_width;
++extern "C" float rt64_aspect_ratio_scale;
++extern "C" float rt64_ext_aspect_percentage;
++
+ namespace RT64 {
+     namespace GBI_F3DNABOO {
+         // Size of the microcode's data segment, loaded into DMEM at the start of each task.
+@@ -197,6 +203,41 @@ namespace RT64 {
+             return float(value) / 65536.0f;
+         }
+ 
++        // The HUD's 3D pieces (the radar's ring) go with the HUD's rectangles when those are anchored
++        // to a side (RDP::drawTexRect, rt64_auto_anchor_fb_width): a model whose origin lands in a
++        // region an anchored rectangle was drawn in, this frame or the last, is moved across by as
++        // much as the rectangle was, in clip space (x += shift * w). A world model passing behind
++        // the radar would be moved with it while it's there.
++        static void anchorHudModel(State *state) {
++            if ((rt64_auto_anchor_fb_width == 0) || (state->rdp->colorImage.width != rt64_auto_anchor_fb_width)) {
++                return;
++            }
++
++            const float w = hookMatrix[3][3];
++            if (w <= 0.0f) {
++                return;
++            }
++
++            // Where the model's origin is, in the framebuffer the rectangles are given in: the
++            // viewport stretches over the wider picture, the rectangles keep the game's shape.
++            const Vp_t *vp = reinterpret_cast<const Vp_t *>(&dmem[0x130]);
++            const float scale = std::max(rt64_aspect_ratio_scale, 1.0f);
++            const float halfWidth = float(rt64_auto_anchor_fb_width) / 2.0f;
++            const float viewportX = (float(vp->vtrans[1]) + (hookMatrix[3][0] / w) * float(vp->vscale[1])) / 4.0f;
++            const float viewportY = (float(vp->vtrans[0]) + (hookMatrix[3][1] / w) * float(vp->vscale[0])) / 4.0f;
++            const float rectX = halfWidth + (viewportX - halfWidth) * scale;
++            const uint16_t origin = RDP::autoAnchorAt(state, int32_t(rectX * 4.0f), int32_t(viewportY * 4.0f));
++            if (origin == G_EX_ORIGIN_NONE) {
++                return;
++            }
++
++            const float shift = ((origin == G_EX_ORIGIN_RIGHT) ? 1.0f : -1.0f) * rt64_ext_aspect_percentage * (1.0f - 1.0f / scale);
++            hlslpp::float4x4 &m = state->rsp->modelViewProjMatrix;
++            for (uint32_t r = 0; r < 4; r++) {
++                m[r][0] = m[r][0] + shift * m[r][3];
++            }
++        }
++
+         // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
+         static void loadHookMatrix(State *state) {
+             if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
+@@ -213,6 +254,7 @@ namespace RT64 {
+ 
+             state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
+             flipMatrixY(state->rsp.get());
++            anchorHudModel(state);
+             hookMatrixLoaded = true;
+         }
+ 
 diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
 index e1889e5..9e613df 100644
 --- a/src/hle/rt64_present.h
@@ -29,6 +96,123 @@ index 5f434ad..2fb50dc 100644
  
                      const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
                      if (useDownsampling) {
+diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
+index a10c11a..653516a 100644
+--- a/src/hle/rt64_rdp.cpp
++++ b/src/hle/rt64_rdp.cpp
+@@ -5,6 +5,7 @@
+ #include "rt64_rdp.h"
+ 
+ #include <cassert>
++#include <vector>
+ 
+ #include "../include/rt64_extended_gbi.h"
+ 
+@@ -14,6 +15,7 @@
+ #include "rt64_color_converter.h"
+ #include "rt64_interpreter.h"
+ #include "rt64_state.h"
++#include "rt64_workload_queue.h"
+ 
+ #ifndef NDEBUG
+ //#   define ASSERT_LOAD_METHODS
+@@ -25,6 +27,28 @@
+ //#   define LOG_LOAD_METHODS
+ #endif
+ 
++// See RDP::drawTexRect: the framebuffer width a game's HUD is anchored in (0: none).
++extern "C" uint32_t rt64_auto_anchor_fb_width = 0;
++
++namespace {
++    // The regions anchored rectangles were drawn in, this frame and the last (RDP::autoAnchorAt).
++    struct AnchorRegion {
++        int32_t ulx, uly, lrx, lry;
++        uint16_t origin;
++    };
++
++    std::vector<AnchorRegion> anchorRegions[2];
++    int anchorFrame = -1;
++
++    void advanceAnchorFrame(int frame) {
++        if (frame != anchorFrame) {
++            anchorRegions[1] = std::move(anchorRegions[0]);
++            anchorRegions[0].clear();
++            anchorFrame = frame;
++        }
++    }
++};
++
+ namespace RT64 {
+     // RDP
+     static uint8_t getCommandLength(uint32_t commandId) {
+@@ -1313,7 +1337,53 @@ namespace RT64 {
+         }
+     }
+ 
++    uint16_t RDP::autoAnchorAt(State *state, int32_t x, int32_t y) {
++        advanceAnchorFrame(state->ext.workloadQueue->writeCursor);
++        for (const std::vector<AnchorRegion> &regions : anchorRegions) {
++            for (const AnchorRegion &region : regions) {
++                if ((x >= region.ulx) && (x < region.lrx) && (y >= region.uly) && (y < region.lry)) {
++                    return region.origin;
++                }
++            }
++        }
++
++        return G_EX_ORIGIN_NONE;
++    }
++
+     void RDP::drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
++        // A game without the extended GBI can still have its HUD anchored to the sides
++        // (rt64_auto_anchor_fb_width): rectangles without depth, a third of the way in from
++        // either side, given relative to that side so they land where the game put them.
++        // The scissor spans the wider picture meanwhile (its sides anchored to the picture's),
++        // or it would cut them off at the game's own sides.
++        const uint32_t width = colorImage.width;
++        if ((rt64_auto_anchor_fb_width != 0) && (width == rt64_auto_anchor_fb_width) && !otherMode.zCmp() && !otherMode.zUpd() &&
++            (extended.global.rect.leftOrigin == G_EX_ORIGIN_NONE) && (extended.global.rect.rightOrigin == G_EX_ORIGIN_NONE))
++        {
++            const int32_t center = (ulx + lrx) / 2;
++            const int32_t third = int32_t(width * 4) / 3;
++            if ((center < third) || (center > int32_t(width * 4) - third)) {
++                ExtendedAlignment anchored = extended.global.rect;
++                const bool right = (center > third);
++                const uint16_t origin = right ? G_EX_ORIGIN_RIGHT : G_EX_ORIGIN_LEFT;
++                anchored.leftOrigin = anchored.rightOrigin = origin;
++                anchored.leftOffset = anchored.rightOffset = right ? -int32_t(width * 4) : 0;
++                advanceAnchorFrame(state->ext.workloadQueue->writeCursor);
++                anchorRegions[0].push_back({ ulx, uly, lrx, lry, origin });
++
++                const uint16_t savedLeft = extended.scissorLeftOriginStack[scissorStackSize - 1];
++                const uint16_t savedRight = extended.scissorRightOriginStack[scissorStackSize - 1];
++                extended.scissorLeftOriginStack[scissorStackSize - 1] = G_EX_ORIGIN_LEFT;
++                extended.scissorRightOriginStack[scissorStackSize - 1] = G_EX_ORIGIN_RIGHT;
++                state->updateDrawStatusAttribute(DrawAttribute::Scissor);
++                drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip, anchored);
++                extended.scissorLeftOriginStack[scissorStackSize - 1] = savedLeft;
++                extended.scissorRightOriginStack[scissorStackSize - 1] = savedRight;
++                state->updateDrawStatusAttribute(DrawAttribute::Scissor);
++                return;
++            }
++        }
++
+         drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip, extended.global.rect);
+     }
+     
+diff --git a/src/hle/rt64_rdp.h b/src/hle/rt64_rdp.h
+index 84f4e7c..84f639f 100644
+--- a/src/hle/rt64_rdp.h
++++ b/src/hle/rt64_rdp.h
+@@ -208,6 +208,9 @@ namespace RT64 {
+         void drawTris(uint32_t triCount, const float *pos, const float *tc, const float *col, uint8_t tile, uint8_t levels);
+         void drawRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip);
+         void drawRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip, const ExtendedAlignment &extAlignment);
++        // The side an anchored HUD rectangle (rt64_auto_anchor_fb_width) was drawn at the framebuffer
++        // position x, y (in quarter pixels), this frame or the last; G_EX_ORIGIN_NONE if none.
++        static uint16_t autoAnchorAt(State *state, int32_t x, int32_t y);
+         void drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip);
+         void drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip, const ExtendedAlignment &extAlignment);
+         void updateCallTexcoords(float u, float v);
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
 index 2970e71..6c1f71a 100644
 --- a/src/hle/rt64_state.cpp
@@ -141,10 +325,10 @@ index 8ea27d5..53dc20b 100644
          DebuggerCamera debuggerCamera;
          std::multimap<uint32_t, uint32_t> transformIdMap;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..d4e278a 100644
+index 5a331aa..c1f71c7 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -10,6 +10,12 @@
+@@ -10,6 +10,13 @@
  
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
@@ -153,11 +337,12 @@ index 5a331aa..d4e278a 100644
 +// widens that (see rt64_game_widens_projection).
 +extern "C" float rt64_aspect_ratio_scale = 1.0f;
 +extern "C" bool rt64_keep_original_aspect = false;
++extern "C" float rt64_ext_aspect_percentage = 0.0f;
 +
  namespace RT64 {
      // WorkloadQueue
  
-@@ -120,7 +126,7 @@ namespace RT64 {
+@@ -120,7 +127,7 @@ namespace RT64 {
          framebufferRenderer->updateMultisampling();
      }
  
@@ -166,7 +351,7 @@ index 5a331aa..d4e278a 100644
          const std::scoped_lock lock(ext.sharedResources->configurationMutex);
          const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
          ext.sharedResources->swapChainSizeChanged = false;
-@@ -131,7 +137,16 @@ namespace RT64 {
+@@ -131,7 +138,16 @@ namespace RT64 {
          const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
  
          // Compute the aspect ratio to be used for the frame.
@@ -184,11 +369,12 @@ index 5a331aa..d4e278a 100644
  
          const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
          switch (ratioMode) {
-@@ -208,6 +223,15 @@ namespace RT64 {
+@@ -208,6 +224,16 @@ namespace RT64 {
  
          // Build the resolution scale vector from the configuration.
          workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
 +        rt64_aspect_ratio_scale = workloadConfig.aspectRatioScale;
++        rt64_ext_aspect_percentage = workloadConfig.extAspectPercentage;
 +
 +        // The game still learns the configured widening above, for the frames it does widen.
 +        if (keepOriginalAspect) {
@@ -200,7 +386,7 @@ index 5a331aa..d4e278a 100644
          workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
          workloadConfig.downsampleMultiplier = ext.sharedResources->userConfig.downsampleMultiplier;
          ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
-@@ -314,6 +338,7 @@ namespace RT64 {
+@@ -314,6 +340,7 @@ namespace RT64 {
              projParams.curFrameWeight = curFrameWeight;
              projParams.prevFrameWeight = prevFrameWeight;
              projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
@@ -208,7 +394,7 @@ index 5a331aa..d4e278a 100644
              projectionProcessor.process(projParams);
              projectionProcessor.upload(projParams);
              uploadProjections = true;
-@@ -628,6 +653,7 @@ namespace RT64 {
+@@ -628,6 +655,7 @@ namespace RT64 {
                      drawParams.rasterShaderCache = ext.rasterShaderCache;
                      drawParams.resolutionScale = fixedResScale;
                      drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
@@ -216,7 +402,7 @@ index 5a331aa..d4e278a 100644
                      drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
                      drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
                      drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
-@@ -912,7 +938,7 @@ namespace RT64 {
+@@ -912,7 +940,7 @@ namespace RT64 {
  
                  ElapsedTimer workloadTimer;
                  workloadProfiler.start();
