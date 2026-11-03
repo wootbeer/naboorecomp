@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 9208da1..4bf506c 100644
+index 9208da1..7387ffe 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -23,6 +23,12 @@
@@ -81,18 +81,20 @@ index 9208da1..4bf506c 100644
              hookMatrixLoaded = true;
          }
  
-@@ -476,6 +527,15 @@ namespace RT64 {
+@@ -476,6 +527,17 @@ namespace RT64 {
                      disableInterpolation(state);
                  }
  
-+                // Nothing the game does reads its framebuffers back from RAM (its effects that
-+                // sample them go through RT64's GPU copies), so frames aren't rendered a second time
-+                // at the original resolution to write them there: that took about half of each
-+                // frame's time, and wrote lines past the end of the game's 444-line framebuffer
-+                // (it draws 448). RT64_NABOO_RENDER_TO_RAM=1 turns it back on.
-+                if (!useRenderToRAM()) {
-+                    state->setRenderToRAM(0);
-+                }
++                // In play nothing reads the framebuffer back from RAM (effects that sample it go
++                // through RT64's GPU copies), so frames aren't rendered a second time at the
++                // original resolution to write them there: that took about half of each frame's
++                // time. Only in play (the game's 400-wide framebuffer, while it asks for its HUD to
++                // be anchored): without the second render the game thread no longer waits for the
++                // renderer, and on the menus' other framebuffer sizes (craft select's 512) a
++                // render target being remade raced the renderer and crashed it (D3D12).
++                // RT64_NABOO_RENDER_TO_RAM=1 keeps it on everywhere.
++                const bool inPlay = (rt64_auto_anchor_fb_width != 0) && (state->rdp->colorImage.width == rt64_auto_anchor_fb_width);
++                state->setRenderToRAM((useRenderToRAM() || !inPlay) ? 1 : 0);
 +
                  runMicrocode(state, state->displayListAddress);
                  *dl = nullptr;

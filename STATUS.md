@@ -181,6 +181,16 @@ pause, the crawl's text and cutscenes look the same either way. It may also
 be the crashes: the game draws 448 lines into a framebuffer the VI shows as
 444, so writing frames back to RDRAM went past its end.
 
+Then a crash at craft select (user, D3D12): `D3D12CommandList::clearColor`
+with no framebuffer bound, recording a fill rectangle on RT64's render thread.
+Without the second render the game thread no longer waits for the renderer,
+and craft select draws into a 512-wide framebuffer (play: 400), so a render
+target being remade likely raced the renderer (its framebuffer storage is
+dropped when a target is remade). Not reproducible here (Vulkan). So render to
+RAM is now off only in play: the game's 400-wide framebuffer while it asks for
+its HUD anchored (`rt64_auto_anchor_fb_width`); menus, craft select, pause and
+cutscenes keep it, as before.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole
