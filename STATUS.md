@@ -166,6 +166,21 @@ while the mode word at 0x4005C84C is 0; it's 5 paused, 7 cinematic):
 - Not while paused: the pause menu's text is drawn a letter at a time, and
   letters near the sides came apart.
 
+**Lag spikes, and render to RAM** (user's RT64 inspector: "Display List"
+about 36 ms a frame, 22 ms of it CPU, everything else 1 ms or less). Timed
+here: the interpreter itself is ~2 ms a task (~450k instructions at ~4.5 ns),
+the 3D hooks under 1 ms, and almost all the rest (20-25 ms) is the RDP list
+holding SYNC_FULL, i.e. `State::fullSync`. With RT64's default "render to
+RAM" it renders every frame a second time at the original resolution and
+waits for it, to write it to RDRAM. Nothing the game does reads a
+framebuffer back from RAM (its framebuffer effects use RT64's GPU copies),
+so the Naboo module turns it off (`state->setRenderToRAM(0)` in
+`beginDisplayList`; `RT64_NABOO_RENDER_TO_RAM=1` turns it back on): ~11 ms a
+task here instead of ~22, and title, menus, briefing, craft select, play,
+pause, the crawl's text and cutscenes look the same either way. It may also
+be the crashes: the game draws 448 lines into a framebuffer the VI shows as
+444, so writing frames back to RDRAM went past its end.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole

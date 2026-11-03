@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 9208da1..188392f 100644
+index 9208da1..4bf506c 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -23,6 +23,12 @@
@@ -15,7 +15,23 @@ index 9208da1..188392f 100644
  namespace RT64 {
      namespace GBI_F3DNABOO {
          // Size of the microcode's data segment, loaded into DMEM at the start of each task.
-@@ -197,6 +203,41 @@ namespace RT64 {
+@@ -170,6 +176,15 @@ namespace RT64 {
+         static uint8_t hookViewportData[0x10];
+         static bool hookViewportLoaded = false;
+ 
++        static bool useRenderToRAM() {
++            static const bool renderToRAM = []() {
++                const char *value = getenv("RT64_NABOO_RENDER_TO_RAM");
++                return (value != nullptr) && (value[0] == '1');
++            }();
++
++            return renderToRAM;
++        }
++
+         static bool useTriangleHooks() {
+             static const bool useRDPTriangles = []() {
+                 const char *value = getenv("RT64_NABOO_RDP_TRIANGLES");
+@@ -197,6 +212,41 @@ namespace RT64 {
              return float(value) / 65536.0f;
          }
  
@@ -57,7 +73,7 @@ index 9208da1..188392f 100644
          // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
          static void loadHookMatrix(State *state) {
              if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
-@@ -213,6 +254,7 @@ namespace RT64 {
+@@ -213,6 +263,7 @@ namespace RT64 {
  
              state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
              flipMatrixY(state->rsp.get());
@@ -65,6 +81,22 @@ index 9208da1..188392f 100644
              hookMatrixLoaded = true;
          }
  
+@@ -476,6 +527,15 @@ namespace RT64 {
+                     disableInterpolation(state);
+                 }
+ 
++                // Nothing the game does reads its framebuffers back from RAM (its effects that
++                // sample them go through RT64's GPU copies), so frames aren't rendered a second time
++                // at the original resolution to write them there: that took about half of each
++                // frame's time, and wrote lines past the end of the game's 444-line framebuffer
++                // (it draws 448). RT64_NABOO_RENDER_TO_RAM=1 turns it back on.
++                if (!useRenderToRAM()) {
++                    state->setRenderToRAM(0);
++                }
++
+                 runMicrocode(state, state->displayListAddress);
+                 *dl = nullptr;
+                 return;
 diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
 index e1889e5..9e613df 100644
 --- a/src/hle/rt64_present.h
