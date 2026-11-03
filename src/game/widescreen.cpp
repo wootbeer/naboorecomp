@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 #include "recomp.h"
 
@@ -37,6 +38,13 @@ void naboo_widescreen_init() {
 }
 
 namespace {
+    // Testing switches, for telling which widening a problem comes from:
+    // NABOO_NO_TERRAIN_WIDEN=1, NABOO_NO_PORTAL_WIDEN=1.
+    bool switched_off(const char* name) {
+        const char* value = std::getenv(name);
+        return (value != nullptr) && (value[0] == '1');
+    }
+
     bool in_cutscene(uint8_t* rdram) {
         return MEM_W(0, (gpr)(int32_t)0x4005C84C) == 7;
     }
@@ -82,6 +90,11 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
 }
 
 extern "C" void naboo_widen_portals(uint8_t* rdram) {
+    static const bool off = switched_off("NABOO_NO_PORTAL_WIDEN");
+    if (off) {
+        return;
+    }
+
     const float scale = widescreen_scale();
     if (in_cutscene(rdram) || (scale == 1.0f)) {
         return;
@@ -92,6 +105,11 @@ extern "C" void naboo_widen_portals(uint8_t* rdram) {
 }
 
 extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr address) {
+    static const bool off = switched_off("NABOO_NO_TERRAIN_WIDEN");
+    if (off) {
+        return;
+    }
+
     const float scale = widescreen_scale();
     if (in_cutscene(rdram) || (scale == 1.0f)) {
         return;
