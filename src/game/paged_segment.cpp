@@ -32,8 +32,21 @@ void naboo_audio_ring_note_rdram(uint8_t* rdram);
 // src/game/widescreen.cpp: the 3D camera widens itself for widescreen.
 void naboo_widescreen_init();
 
+// NABOO_PERF's watchdog (lib-patches/rt64/0026) reports the game's threads when no graphics
+// task has finished for 3 s (lib-patches/N64ModernRuntime/0011): for freezes.
+extern "C" void (*rt64_stall_callback)(void);
+static uint8_t* stall_rdram = nullptr;
+
+static void report_stall() {
+    if (stall_rdram != nullptr) {
+        ultramodern::debug_dump_threads(stall_rdram);
+    }
+}
+
 void naboo_on_init(uint8_t* rdram, recomp_context*) {
     naboo_crash_note_rdram(rdram);
+    stall_rdram = rdram;
+    rt64_stall_callback = report_stall;
     naboo_audio_ring_note_rdram(rdram);
     naboo_widescreen_init();
 

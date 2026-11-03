@@ -200,6 +200,26 @@ and a watchdog says which of those (or "between tasks", waiting for the
 game) no task has left for 3 s. Here: task 5-8 ms (microcode 3-5, RDP 0.2,
 end of frame 2-4).
 
+**The freeze: the game stops, not the renderer** (user's NABOO_PERF log:
+tasks 4-8 ms at 30 a second, the spikes all in RT64's end of frame, 96-216
+ms now and then; then "no graphics task has finished ... stuck in between
+tasks (waiting for the game)"). Two runtime changes
+(`lib-patches/N64ModernRuntime/0011`):
+
+- Each thread's host context is kept in a table outside game memory. The
+  OSThread's context field overlays where libultra keeps a thread's saved
+  registers, the game handles its OSThreads itself (it reads
+  __osRunningThread in ~40 places to find its current process, whose struct
+  holds the OSThread), and the earlier crash in `check_running_queue` read
+  host address -1, i.e. a garbage host pointer from game memory. The field
+  is still written and checked against the table: a mismatch is reported
+  once per thread ("[ultramodern] Thread N's OSThread was overwritten"), and
+  the table's pointer is used.
+- `ultramodern::debug_dump_threads` prints every thread (priority, state,
+  the queue it waits in with that queue's message counts) and the running
+  queue; NABOO_PERF's watchdog calls it through `rt64_stall_callback`
+  (set in `naboo_on_init`) when no graphics task has finished for 3 s.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole

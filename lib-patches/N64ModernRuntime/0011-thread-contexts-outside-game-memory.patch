@@ -1,0 +1,184 @@
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 3290724..f4eb66a 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -79,6 +79,8 @@ void wait_for_external_message_timed(RDRAM_ARG1, u32 millis);
+ 
+ // Thread scheduling.
+ void check_running_queue(RDRAM_ARG1);
++// Prints every game thread: priority, state and the queue it waits in (for freezes).
++void debug_dump_threads(RDRAM_ARG1);
+ // The game's own __osRunningThread, for games that read it directly: the runtime
+ // writes the running thread there whenever a game thread resumes.
+ void set_running_thread_address(PTR(PTR(OSThread)) address);
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 1fecee8..43a7ce4 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -2,6 +2,8 @@
+ #include <thread>
+ #include <cassert>
+ #include <string>
++#include <mutex>
++#include <unordered_map>
+ 
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+@@ -154,6 +156,74 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
+ // (ultramodern::set_running_thread_address). Kept up to date as threads run.
+ static PTR(PTR(OSThread)) running_thread_address = NULLPTR;
+ 
++// Each game thread's host context, kept here rather than only in the OSThread in game
++// memory: the OSThread's context field overlays the space libultra keeps a thread's saved
++// registers in, and a game writing there would leave a garbage host pointer that a thread
++// switch then follows. The field is still written, and checked against this table, so such
++// a write is reported (once per thread) instead of crashing. Also the list of threads for
++// debug_dump_threads.
++static std::mutex thread_contexts_mutex;
++static std::unordered_map<OSThread*, UltraThreadContext*> thread_contexts;
++
++static void set_thread_context(OSThread* t, UltraThreadContext* context) {
++    std::lock_guard lock{ thread_contexts_mutex };
++    thread_contexts[t] = context;
++    t->context = context;
++}
++
++static UltraThreadContext* thread_context_of(OSThread* t) {
++    std::lock_guard lock{ thread_contexts_mutex };
++    auto it = thread_contexts.find(t);
++    UltraThreadContext* context = (it != thread_contexts.end()) ? it->second : nullptr;
++    if (t->context != context) {
++        static std::unordered_map<OSThread*, bool> reported;
++        if (!reported[t]) {
++            reported[t] = true;
++            fprintf(stderr, "[ultramodern] Thread %d's OSThread was overwritten: its context field holds %p, not %p\n", t->id, (void*)t->context, (void*)context);
++            fflush(stderr);
++        }
++        t->context = context;
++    }
++    return context;
++}
++
++void ultramodern::debug_dump_threads(RDRAM_ARG1) {
++    std::lock_guard lock{ thread_contexts_mutex };
++    if (running_thread_address != NULLPTR) {
++        fprintf(stderr, "[ultramodern] Running thread (osRunningThread): 0x%08X\n", (uint32_t)*TO_PTR(PTR(OSThread), running_thread_address));
++    }
++    for (const auto& [t, context] : thread_contexts) {
++        const uint32_t address = 0x80000000u | uint32_t(reinterpret_cast<uint8_t*>(t) - rdram);
++        const char* state = "?";
++        switch (t->state) {
++        case OSThreadState::STOPPED: state = "stopped"; break;
++        case OSThreadState::QUEUED: state = "queued to run"; break;
++        case OSThreadState::RUNNING: state = "running"; break;
++        case OSThreadState::BLOCKED: state = "blocked"; break;
++        }
++        fprintf(stderr, "[ultramodern] Thread %d at 0x%08X: priority %d, %s, ", t->id, address, t->priority, state);
++        if (t->queue == ultramodern::running_queue) {
++            fprintf(stderr, "in the running queue");
++        }
++        else if (t->queue != NULLPTR) {
++            // The queue is a message queue's blocked_on_recv (its first word) or blocked_on_send.
++            const uint32_t q = uint32_t(t->queue);
++            fprintf(stderr, "in queue 0x%08X (as recv: %d of %d messages; as send: %d of %d)", q,
++                *TO_PTR(int32_t, q + 8), *TO_PTR(int32_t, q + 16), *TO_PTR(int32_t, q + 4), *TO_PTR(int32_t, q + 12));
++        }
++        else {
++            fprintf(stderr, "in no queue");
++        }
++        fprintf(stderr, ", next 0x%08X, context %s\n", (uint32_t)t->next, (context == nullptr) ? "none (destroyed)" : ((t->context == context) ? "ok" : "OVERWRITTEN"));
++    }
++    fprintf(stderr, "[ultramodern] Running queue:");
++    for (PTR(OSThread) cur = ultramodern::thread_queue_peek(PASS_RDRAM ultramodern::running_queue); cur != NULLPTR; cur = TO_PTR(OSThread, cur)->next) {
++        fprintf(stderr, " %d", TO_PTR(OSThread, cur)->id);
++    }
++    fprintf(stderr, "\n");
++    fflush(stderr);
++}
++
+ void ultramodern::set_running_thread_address(PTR(PTR(OSThread)) address) {
+     running_thread_address = address;
+ }
+@@ -162,7 +232,7 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+     thread_context->running.wait();
+     // If this thread's context was replaced by another thread or deleted, destroy it again from its own context.
+     // This will trigger thread cleanup instead.
+-    if (TO_PTR(OSThread, ultramodern::this_thread())->context != thread_context) {
++    if (thread_context_of(TO_PTR(OSThread, ultramodern::this_thread())) != thread_context) {
+         osDestroyThread(PASS_RDRAM NULLPTR);
+     }
+     // Only now, when this thread really runs again: a thread that another one
+@@ -174,7 +244,7 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+ 
+ void resume_thread(OSThread* t) {
+     debug_printf("[Thread] Resuming execution of thread %d\n", t->id);
+-    t->context->running.signal();
++    thread_context_of(t)->running.signal();
+ }
+ 
+ void run_next_thread(RDRAM_ARG1) {
+@@ -184,17 +254,17 @@ void run_next_thread(RDRAM_ARG1) {
+ 
+     OSThread* to_run = TO_PTR(OSThread, ultramodern::thread_queue_pop(PASS_RDRAM ultramodern::running_queue));
+     debug_printf("[Scheduling] Resuming execution of thread %d\n", to_run->id);
+-    to_run->context->running.signal();
++    thread_context_of(to_run)->running.signal();
+ }
+ 
+ void ultramodern::run_next_thread_and_wait(RDRAM_ARG1) {
+-    UltraThreadContext* cur_context = TO_PTR(OSThread, thread_self)->context;
++    UltraThreadContext* cur_context = thread_context_of(TO_PTR(OSThread, thread_self));
+     run_next_thread(PASS_RDRAM1);
+     wait_for_resumed(PASS_RDRAM cur_context);
+ }
+ 
+ void ultramodern::resume_thread_and_wait(RDRAM_ARG OSThread *t) {
+-    UltraThreadContext* cur_context = TO_PTR(OSThread, thread_self)->context;
++    UltraThreadContext* cur_context = thread_context_of(TO_PTR(OSThread, thread_self));
+     resume_thread(t);
+     wait_for_resumed(PASS_RDRAM cur_context);
+ }
+@@ -221,7 +291,7 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+     }
+ 
+     // Make sure the thread wasn't replaced or destroyed before it was started.
+-    if (self->context == thread_context) {
++    if (thread_context_of(self) == thread_context) {
+         debug_printf("[Thread] Thread started: %d\n", self->id);
+         try {
+             // Run the thread's function with the provided argument.
+@@ -235,8 +305,8 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+ 
+     // Check if the thread hasn't been destroyed or replaced. If so, then the thread terminated or destroyed itself,
+     // so mark this thread as destroyed and run the next queued thread.
+-    if (self->context == thread_context) {
+-        self->context = nullptr;
++    if (thread_context_of(self) == thread_context) {
++        set_thread_context(self, nullptr);
+         run_next_thread(PASS_RDRAM1);
+     }
+ 
+@@ -281,8 +351,8 @@ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_f
+     // Spawn a new thread, which will immediately pause itself and wait until it's been started.
+     // Pass the context as an argument to the thread function to ensure that it can't get cleared before the thread captures its value.
+     UltraThreadContext* context = new UltraThreadContext{};
+-    t->context = context;
+-    context->host_thread = std::thread{_thread_func, PASS_RDRAM t_, entrypoint, arg, t->context};
++    set_thread_context(t, context);
++    context->host_thread = std::thread{_thread_func, PASS_RDRAM t_, entrypoint, arg, context};
+ 
+     // Wait until the thread is initialized to indicate that it's ready to be started.
+     context->initialized.wait();
+@@ -324,10 +394,10 @@ extern "C" void osDestroyThread(RDRAM_ARG PTR(OSThread) t_) {
+         ultramodern::thread_queue_remove(PASS_RDRAM t->queue, t_);
+     }
+     // Check if the thread has already been destroyed to prevent destroying it again.
+-    UltraThreadContext* cur_context = t->context;
++    UltraThreadContext* cur_context = thread_context_of(t);
+     if (cur_context != nullptr) {
+         // Mark the target thread as destroyed and resume it. When it starts it'll check this and terminate itself instead of resuming.
+-        t->context = nullptr;
++        set_thread_context(t, nullptr);
+         cur_context->running.signal();
+     }
+ }

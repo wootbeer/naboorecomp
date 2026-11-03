@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 9208da1..b807350 100644
+index 9208da1..907008e 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -5,6 +5,9 @@
@@ -12,7 +12,7 @@ index 9208da1..b807350 100644
  #include <cassert>
  #include <cmath>
  #include <cstdio>
-@@ -23,6 +26,12 @@
+@@ -23,6 +26,16 @@
  // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
  // independent implementation for RT64 that follows that description.
  
@@ -22,10 +22,14 @@ index 9208da1..b807350 100644
 +extern "C" float rt64_aspect_ratio_scale;
 +extern "C" float rt64_ext_aspect_percentage;
 +
++// Called by NABOO_PERF's watchdog when no graphics task has finished for 3 s, for the game
++// to report its own state (its threads).
++extern "C" void (*rt64_stall_callback)(void) = nullptr;
++
  namespace RT64 {
      namespace GBI_F3DNABOO {
          // Size of the microcode's data segment, loaded into DMEM at the start of each task.
-@@ -119,6 +128,81 @@ namespace RT64 {
+@@ -119,6 +132,84 @@ namespace RT64 {
              return !useHLE;
          }
  
@@ -72,6 +76,9 @@ index 9208da1..b807350 100644
 +                            reported = last;
 +                            fprintf(stderr, "[NABOO PERF] no graphics task has finished for %lld ms: stuck in %s\n", (long long)stalled, PhaseNames[phase.load()]);
 +                            fflush(stderr);
++                            if (rt64_stall_callback != nullptr) {
++                                rt64_stall_callback();
++                            }
 +                        }
 +                    }
 +                }).detach();
@@ -107,7 +114,7 @@ index 9208da1..b807350 100644
          static void interpreterRDPCommands(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) {
              State *state = reinterpret_cast<State *>(userData);
              if ((start < OutputBufferAddress) || (end > OutputBufferAddress + OutputBufferSize)) {
-@@ -127,7 +211,22 @@ namespace RT64 {
+@@ -127,7 +218,22 @@ namespace RT64 {
  
              DisplayList *dlStart = reinterpret_cast<DisplayList *>(&rspOutputBuffer[start - OutputBufferAddress]);
              DisplayList *dlEnd = reinterpret_cast<DisplayList *>(&rspOutputBuffer[end - OutputBufferAddress]);
@@ -130,7 +137,7 @@ index 9208da1..b807350 100644
          }
  
          static void setTriangleVertex(State *state, uint32_t index, uint32_t color, bool textured, float s, float t);
-@@ -170,6 +269,15 @@ namespace RT64 {
+@@ -170,6 +276,15 @@ namespace RT64 {
          static uint8_t hookViewportData[0x10];
          static bool hookViewportLoaded = false;
  
@@ -146,7 +153,7 @@ index 9208da1..b807350 100644
          static bool useTriangleHooks() {
              static const bool useRDPTriangles = []() {
                  const char *value = getenv("RT64_NABOO_RDP_TRIANGLES");
-@@ -197,6 +305,41 @@ namespace RT64 {
+@@ -197,6 +312,41 @@ namespace RT64 {
              return float(value) / 65536.0f;
          }
  
@@ -188,7 +195,7 @@ index 9208da1..b807350 100644
          // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
          static void loadHookMatrix(State *state) {
              if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
-@@ -213,6 +356,7 @@ namespace RT64 {
+@@ -213,6 +363,7 @@ namespace RT64 {
  
              state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
              flipMatrixY(state->rsp.get());
@@ -196,7 +203,7 @@ index 9208da1..b807350 100644
              hookMatrixLoaded = true;
          }
  
-@@ -453,7 +597,19 @@ namespace RT64 {
+@@ -453,7 +604,19 @@ namespace RT64 {
  
              memset(rsp->gpr, 0, sizeof(rsp->gpr));
              rsp->setPc(0);
@@ -216,7 +223,7 @@ index 9208da1..b807350 100644
              if (result != RSPInterpreter::Result::Broke) {
                  fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
              }
-@@ -476,6 +632,17 @@ namespace RT64 {
+@@ -476,6 +639,17 @@ namespace RT64 {
                      disableInterpolation(state);
                  }
  
