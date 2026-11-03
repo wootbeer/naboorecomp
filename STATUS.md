@@ -220,6 +220,22 @@ tasks (waiting for the game)"). Two runtime changes
   queue; NABOO_PERF's watchdog calls it through `rt64_stall_callback`
   (set in `naboo_on_init`) when no graphics task has finished for 3 s.
 
+**The corruption is the terrain widening** (user, `NABOO_NO_TERRAIN_WIDEN=1`:
+24 minutes through level 3, no garbage pointer, no freeze or crash; with it,
+level 2 failed within minutes). The microcode's DMA writes to RAM cover the
+same ranges either way, so it's the game's own terrain code: the wider
+footprint makes a level of detail span more of the grid (about 26 cells to
+28-31) and something sized for the 4:3 footprint overflows; not found yet.
+Terrain widening is now off unless `NABOO_TERRAIN_WIDEN=1`; terrain past the
+4:3 sides is cut off again.
+
+**Black screen after a failed mission's high scores** (buttons still
+worked). The in-play flag (`rt64_auto_anchor_fb_width`) was set each time
+the camera was built and never cleared, so the 2D screens after a mission
+kept render to RAM off, and they show the last frame read back from RAM. The
+game now also counts (`rt64_auto_anchor_serial`); a display list with no
+count since the last one isn't in play: no anchoring, render to RAM on.
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole

@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 9208da1..907008e 100644
+index 9208da1..a92478b 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -5,6 +5,9 @@
@@ -12,13 +12,14 @@ index 9208da1..907008e 100644
  #include <cassert>
  #include <cmath>
  #include <cstdio>
-@@ -23,6 +26,16 @@
+@@ -23,6 +26,17 @@
  // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
  // independent implementation for RT64 that follows that description.
  
 +// The framebuffer width a game's HUD is drawn at, for RT64 to anchor the HUD's pieces to the
 +// sides of a wider picture (0: none). Set by the game for its in-game frames.
 +extern "C" uint32_t rt64_auto_anchor_fb_width;
++extern "C" uint32_t rt64_auto_anchor_serial;
 +extern "C" float rt64_aspect_ratio_scale;
 +extern "C" float rt64_ext_aspect_percentage;
 +
@@ -29,7 +30,7 @@ index 9208da1..907008e 100644
  namespace RT64 {
      namespace GBI_F3DNABOO {
          // Size of the microcode's data segment, loaded into DMEM at the start of each task.
-@@ -119,6 +132,84 @@ namespace RT64 {
+@@ -119,6 +133,84 @@ namespace RT64 {
              return !useHLE;
          }
  
@@ -114,7 +115,7 @@ index 9208da1..907008e 100644
          static void interpreterRDPCommands(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) {
              State *state = reinterpret_cast<State *>(userData);
              if ((start < OutputBufferAddress) || (end > OutputBufferAddress + OutputBufferSize)) {
-@@ -127,7 +218,22 @@ namespace RT64 {
+@@ -127,7 +219,22 @@ namespace RT64 {
  
              DisplayList *dlStart = reinterpret_cast<DisplayList *>(&rspOutputBuffer[start - OutputBufferAddress]);
              DisplayList *dlEnd = reinterpret_cast<DisplayList *>(&rspOutputBuffer[end - OutputBufferAddress]);
@@ -137,7 +138,7 @@ index 9208da1..907008e 100644
          }
  
          static void setTriangleVertex(State *state, uint32_t index, uint32_t color, bool textured, float s, float t);
-@@ -170,6 +276,15 @@ namespace RT64 {
+@@ -170,6 +277,15 @@ namespace RT64 {
          static uint8_t hookViewportData[0x10];
          static bool hookViewportLoaded = false;
  
@@ -153,7 +154,7 @@ index 9208da1..907008e 100644
          static bool useTriangleHooks() {
              static const bool useRDPTriangles = []() {
                  const char *value = getenv("RT64_NABOO_RDP_TRIANGLES");
-@@ -197,6 +312,41 @@ namespace RT64 {
+@@ -197,6 +313,41 @@ namespace RT64 {
              return float(value) / 65536.0f;
          }
  
@@ -195,7 +196,7 @@ index 9208da1..907008e 100644
          // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
          static void loadHookMatrix(State *state) {
              if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
-@@ -213,6 +363,7 @@ namespace RT64 {
+@@ -213,6 +364,7 @@ namespace RT64 {
  
              state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
              flipMatrixY(state->rsp.get());
@@ -203,7 +204,7 @@ index 9208da1..907008e 100644
              hookMatrixLoaded = true;
          }
  
-@@ -453,7 +604,19 @@ namespace RT64 {
+@@ -453,7 +605,19 @@ namespace RT64 {
  
              memset(rsp->gpr, 0, sizeof(rsp->gpr));
              rsp->setPc(0);
@@ -223,7 +224,7 @@ index 9208da1..907008e 100644
              if (result != RSPInterpreter::Result::Broke) {
                  fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
              }
-@@ -476,6 +639,17 @@ namespace RT64 {
+@@ -476,6 +640,27 @@ namespace RT64 {
                      disableInterpolation(state);
                  }
  
@@ -235,6 +236,16 @@ index 9208da1..907008e 100644
 +                // renderer, and on the menus' other framebuffer sizes (craft select's 512) a
 +                // render target being remade raced the renderer and crashed it (D3D12).
 +                // RT64_NABOO_RENDER_TO_RAM=1 keeps it on everywhere.
++                // The game sets the width (and counts) each time it makes a frame in play. A frame
++                // with no count since the last is from a screen without it (after a mission, its
++                // 2D screens show the last frame, read back from RAM): no anchoring, and render
++                // to RAM, until play sets it again.
++                static uint32_t lastSerial = 0;
++                if (rt64_auto_anchor_serial == lastSerial) {
++                    rt64_auto_anchor_fb_width = 0;
++                }
++
++                lastSerial = rt64_auto_anchor_serial;
 +                const bool inPlay = (rt64_auto_anchor_fb_width != 0) && (state->rdp->colorImage.width == rt64_auto_anchor_fb_width);
 +                state->setRenderToRAM((useRenderToRAM() || !inPlay) ? 1 : 0);
 +
@@ -273,7 +284,7 @@ index 5f434ad..2fb50dc 100644
                      const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
                      if (useDownsampling) {
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..653516a 100644
+index a10c11a..8987fe1 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -5,6 +5,7 @@
@@ -292,12 +303,15 @@ index a10c11a..653516a 100644
  
  #ifndef NDEBUG
  //#   define ASSERT_LOAD_METHODS
-@@ -25,6 +27,28 @@
+@@ -25,6 +27,31 @@
  //#   define LOG_LOAD_METHODS
  #endif
  
 +// See RDP::drawTexRect: the framebuffer width a game's HUD is anchored in (0: none).
 +extern "C" uint32_t rt64_auto_anchor_fb_width = 0;
++
++// Counted by the game each time it sets rt64_auto_anchor_fb_width for a frame.
++extern "C" uint32_t rt64_auto_anchor_serial = 0;
 +
 +namespace {
 +    // The regions anchored rectangles were drawn in, this frame and the last (RDP::autoAnchorAt).
@@ -321,7 +335,7 @@ index a10c11a..653516a 100644
  namespace RT64 {
      // RDP
      static uint8_t getCommandLength(uint32_t commandId) {
-@@ -1313,7 +1337,53 @@ namespace RT64 {
+@@ -1313,7 +1340,53 @@ namespace RT64 {
          }
      }
  

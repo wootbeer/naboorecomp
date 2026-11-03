@@ -28,6 +28,7 @@ extern "C" bool rt64_game_widens_projection;
 extern "C" bool rt64_keep_original_aspect;
 extern "C" float rt64_fill_width_center;
 extern "C" uint32_t rt64_auto_anchor_fb_width;
+extern "C" uint32_t rt64_auto_anchor_serial;
 
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
@@ -38,8 +39,8 @@ void naboo_widescreen_init() {
 }
 
 namespace {
-    // Testing switches, for telling which widening a problem comes from:
-    // NABOO_NO_TERRAIN_WIDEN=1, NABOO_NO_PORTAL_WIDEN=1.
+    // Testing switches: NABOO_NO_PORTAL_WIDEN=1 turns the portal widening off, and
+    // NABOO_TERRAIN_WIDEN=1 turns the terrain's on (it's off: see naboo_widen_terrain).
     bool switched_off(const char* name) {
         const char* value = std::getenv(name);
         return (value != nullptr) && (value[0] == '1');
@@ -81,6 +82,7 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     // (lib-patches/rt64/0026, rt64_auto_anchor_fb_width). Not paused: the pause menu's text
     // is drawn a letter at a time, and would come apart.
     rt64_auto_anchor_fb_width = (MEM_W(0, (gpr)(int32_t)0x4005C84C) == 0) ? 400 : 0;
+    rt64_auto_anchor_serial++;
     const float scale = widescreen_scale();
     if (cutscene || (scale == 1.0f)) {
         return;
@@ -104,9 +106,15 @@ extern "C" void naboo_widen_portals(uint8_t* rdram) {
     MEM_W(0, address) = (int32_t)to_bits(to_float((uint32_t)MEM_W(0, address)) / scale);
 }
 
+// Off unless NABOO_TERRAIN_WIDEN=1: with it, level 2 (open terrain) corrupted the game's memory
+// within minutes, a garbage cell rectangle pointer and then a freeze or a crash (a player's
+// 24 minutes without it, through level 3, were clean). The wider footprint makes the terrain
+// code cover more of its grid (the extents a level of detail spans grow from about 26 cells to
+// 28-31) and something it fills is sized for the 4:3 footprint; not found yet. The microcode's
+// own writes to RAM are the same either way. Without it, terrain past the 4:3 sides is cut off.
 extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr address) {
-    static const bool off = switched_off("NABOO_NO_TERRAIN_WIDEN");
-    if (off) {
+    static const bool on = switched_off("NABOO_TERRAIN_WIDEN");
+    if (!on) {
         return;
     }
 
