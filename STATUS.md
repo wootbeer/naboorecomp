@@ -191,6 +191,15 @@ RAM is now off only in play: the game's 400-wide framebuffer while it asks for
 its HUD anchored (`rt64_auto_anchor_fb_width`); menus, craft select, pause and
 cutscenes keep it, as before.
 
+**Timing on players' machines** (user's inspector during a spike: Display
+List 56 ms wall, ~25 ms CPU, shaders 72 to 74, GPU and workload small; then
+a freeze). `NABOO_PERF=1` prints, every 2 s, each graphics task's time split
+into the microcode (interpreter and 3D hooks), the RDP commands it hands
+RT64, and RT64's end of frame (the list with SYNC_FULL), average and worst;
+and a watchdog says which of those (or "between tasks", waiting for the
+game) no task has left for 3 s. Here: task 5-8 ms (microcode 3-5, RDP 0.2,
+end of frame 2-4).
+
 **Still open:** a column of stray pixels on 640-wide 2D screens ("A long
 time ago...", mission complete), at about x = 620 of 640, in the black frames
 between screens. Those frames are drawn by the RDP (a fill over the whole

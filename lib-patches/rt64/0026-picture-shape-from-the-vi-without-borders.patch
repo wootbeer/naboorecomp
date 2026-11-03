@@ -1,8 +1,18 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index 9208da1..7387ffe 100644
+index 9208da1..b807350 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
-@@ -23,6 +23,12 @@
+@@ -5,6 +5,9 @@
+ #include "rt64_gbi_f3dnaboo.h"
+ 
+ #include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <thread>
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
+@@ -23,6 +26,12 @@
  // GLideN64's HLE implementation of it (F5Indi_Naboo.cpp). This is an
  // independent implementation for RT64 that follows that description.
  
@@ -15,7 +25,112 @@ index 9208da1..7387ffe 100644
  namespace RT64 {
      namespace GBI_F3DNABOO {
          // Size of the microcode's data segment, loaded into DMEM at the start of each task.
-@@ -170,6 +176,15 @@ namespace RT64 {
+@@ -119,6 +128,81 @@ namespace RT64 {
+             return !useHLE;
+         }
+ 
++        // NABOO_PERF=1: every 2 s, the time each graphics task takes, split into the microcode
++        // (interpreter and 3D hooks), the RDP commands it sends RT64, and RT64's end of frame
++        // (the list with SYNC_FULL); and a watchdog that says which of those a task is stuck in
++        // if none finishes for 3 s. For timing lag spikes and freezes on players' machines.
++        namespace Perf {
++            enum Phase : int { Idle, Microcode, RDPCommands, FrameEnd };
++            static const char *PhaseNames[] = { "between tasks (waiting for the game)", "the microcode", "RDP commands", "RT64's end of frame" };
++
++            static bool enabled() {
++                static const bool on = []() {
++                    const char *value = getenv("NABOO_PERF");
++                    return (value != nullptr) && (value[0] == '1');
++                }();
++
++                return on;
++            }
++
++            static std::atomic<int> phase{ Idle };
++            static std::atomic<int64_t> lastProgressMs{ 0 };
++            static uint64_t rdpNs = 0, frameEndNs = 0;
++
++            static int64_t nowMs() {
++                return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++            }
++
++            static void startWatchdog() {
++                static bool started = false;
++                if (started) {
++                    return;
++                }
++
++                started = true;
++                lastProgressMs = nowMs();
++                std::thread([]() {
++                    int64_t reported = 0;
++                    while (true) {
++                        std::this_thread::sleep_for(std::chrono::seconds(1));
++                        const int64_t last = lastProgressMs.load();
++                        const int64_t stalled = nowMs() - last;
++                        if ((stalled >= 3000) && (reported != last)) {
++                            reported = last;
++                            fprintf(stderr, "[NABOO PERF] no graphics task has finished for %lld ms: stuck in %s\n", (long long)stalled, PhaseNames[phase.load()]);
++                            fflush(stderr);
++                        }
++                    }
++                }).detach();
++            }
++
++            struct Stat {
++                double total = 0.0, worst = 0.0;
++                void add(double ms) { total += ms; worst = std::max(worst, ms); }
++            };
++
++            static void taskDone(double taskMs) {
++                static Stat task, microcode, rdp, frameEnd;
++                static int tasks = 0;
++                static auto last = std::chrono::steady_clock::now();
++                const double rdpMs = rdpNs / 1e6, frameEndMs = frameEndNs / 1e6;
++                task.add(taskMs); rdp.add(rdpMs); frameEnd.add(frameEndMs); microcode.add(taskMs - rdpMs - frameEndMs);
++                rdpNs = frameEndNs = 0;
++                tasks++;
++                lastProgressMs = nowMs();
++                const auto now = std::chrono::steady_clock::now();
++                if (now - last >= std::chrono::seconds(2)) {
++                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s, ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
++                        tasks, std::chrono::duration<double>(now - last).count(), task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
++                        rdp.total / tasks, rdp.worst, frameEnd.total / tasks, frameEnd.worst);
++                    fflush(stderr);
++                    task = microcode = rdp = frameEnd = Stat();
++                    tasks = 0;
++                    last = now;
++                }
++            }
++        };
++
+         static void interpreterRDPCommands(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) {
+             State *state = reinterpret_cast<State *>(userData);
+             if ((start < OutputBufferAddress) || (end > OutputBufferAddress + OutputBufferSize)) {
+@@ -127,7 +211,22 @@ namespace RT64 {
+ 
+             DisplayList *dlStart = reinterpret_cast<DisplayList *>(&rspOutputBuffer[start - OutputBufferAddress]);
+             DisplayList *dlEnd = reinterpret_cast<DisplayList *>(&rspOutputBuffer[end - OutputBufferAddress]);
++            if (!Perf::enabled()) {
++                state->ext.interpreter->processRDPLists(start, dlStart, dlEnd);
++                return;
++            }
++
++            bool frameEnd = false;
++            for (const DisplayList *command = dlStart; command < dlEnd; command++) {
++                frameEnd = frameEnd || (((command->w0 >> 24) & 0x3F) == 0x29);
++            }
++
++            Perf::phase = frameEnd ? Perf::FrameEnd : Perf::RDPCommands;
++            const auto t0 = std::chrono::steady_clock::now();
+             state->ext.interpreter->processRDPLists(start, dlStart, dlEnd);
++            const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++            (frameEnd ? Perf::frameEndNs : Perf::rdpNs) += ns;
++            Perf::phase = Perf::Microcode;
+         }
+ 
+         static void setTriangleVertex(State *state, uint32_t index, uint32_t color, bool textured, float s, float t);
+@@ -170,6 +269,15 @@ namespace RT64 {
          static uint8_t hookViewportData[0x10];
          static bool hookViewportLoaded = false;
  
@@ -31,7 +146,7 @@ index 9208da1..7387ffe 100644
          static bool useTriangleHooks() {
              static const bool useRDPTriangles = []() {
                  const char *value = getenv("RT64_NABOO_RDP_TRIANGLES");
-@@ -197,6 +212,41 @@ namespace RT64 {
+@@ -197,6 +305,41 @@ namespace RT64 {
              return float(value) / 65536.0f;
          }
  
@@ -73,7 +188,7 @@ index 9208da1..7387ffe 100644
          // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
          static void loadHookMatrix(State *state) {
              if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
-@@ -213,6 +263,7 @@ namespace RT64 {
+@@ -213,6 +356,7 @@ namespace RT64 {
  
              state->rsp->forceMatrixFromData(reinterpret_cast<const FixedMatrix *>(&dmem[0x5C0]));
              flipMatrixY(state->rsp.get());
@@ -81,7 +196,27 @@ index 9208da1..7387ffe 100644
              hookMatrixLoaded = true;
          }
  
-@@ -476,6 +527,17 @@ namespace RT64 {
+@@ -453,7 +597,19 @@ namespace RT64 {
+ 
+             memset(rsp->gpr, 0, sizeof(rsp->gpr));
+             rsp->setPc(0);
++            const bool perf = Perf::enabled();
++            if (perf) {
++                Perf::startWatchdog();
++                Perf::phase = Perf::Microcode;
++            }
++
++            const auto taskStart = std::chrono::steady_clock::now();
+             const RSPInterpreter::Result result = rsp->run(200000000ULL);
++            if (perf) {
++                Perf::phase = Perf::Idle;
++                Perf::taskDone(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - taskStart).count());
++            }
++
+             if (result != RSPInterpreter::Result::Broke) {
+                 fprintf(stderr, "Battle for Naboo's microcode didn't finish (stopped at 0x%03X)\n", rsp->pc);
+             }
+@@ -476,6 +632,17 @@ namespace RT64 {
                      disableInterpolation(state);
                  }
  
