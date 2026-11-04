@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 22)
+## Overview (as of round 23)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,54 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-03, round 23: the terrain's widening, made safe
+
+Round 22 turned the terrain's widening off (`NABOO_TERRAIN_WIDEN=1` to test
+it), as level 2 corrupted the game's memory within minutes with it on. The
+user's freeze log shows the run queue holding OSThreads that live in the
+game's heap (`0x800CBB88`, next `0x8010C1F8`): the game's processes keep
+their OSThread in a heap block. The crash log's stack ran from the terrain
+(`func_4104E8CC` > `func_4104A708` > the display list chunk allocator,
+`func_40006BC8`) into the scheduler, which read a garbage thread.
+
+**What the terrain code writes doesn't change.** Every store in
+`func_41049864`-`func_4105422C` (the terrain's file, `funcs_24.c`) was
+traced to 256-byte blocks, per function, with widening on and off (a
+temporary `sed` over the generated file). Both runs wrote the same buffers:
+the display list chunks (`0x4F5400` up), the row tables (`0x217500`,
+`0x223400`) and its globals at `0x40099100`. The wider footprint only uses
+more of them. Its stack frames reach the same depth either way, the chunk
+pool never ran low (~1200 of its chunks free, no evictions through
+`func_4001ED74`), and the coarse level's cache rows run the same range.
+20-minute soaks with it on didn't crash here, flying low or climbing.
+
+**Who else reads the corners.** Every load and store in the game was
+checked (temporarily, in `recomp.h`'s `MEM_W`) for the camera's eye and far
+corners (`0x40060DBC` + `0x80` to `+0xBC`). Besides the terrain
+(`func_4104A1CC`) and `func_41024064`, which sets them, four other systems
+read all four corners: `func_410244B8` and `func_41027264` (the camera's
+update), `func_4102CE20`, and `func_40023BB0` (called from objects). Round
+22 widened the corners where they're made, so all of them saw the wider
+view; with widening off they see the 4:3 one, the state the user's
+24 minutes ran clean in.
+
+**The change.** The corners are widened only while `func_4104E8CC` builds
+the terrain, and put back as it returns (hooks at its entry and at its
+`jr $ra`). They are a rectangle seen from the eye, 2.0 wide to 1.4 high in
+camera space; the pairs of corners on its long sides are moved apart from
+their midpoints by the widescreen scale, which widens its camera-space x
+exactly, as round 22's change to the direction did. The long sides are
+found by length (the pairing in between the short sides and the
+diagonals), and anything that isn't a rectangle is left alone. The 4:3
+corners are put back only if the corners are still the widened ones (the
+terrain can wait on the chunk pool's lock while other threads run). Not in
+cutscenes. On by default again; `NABOO_NO_TERRAIN_WIDEN=1` turns it off.
+The hills reach both sides as in round 22 (checked side by side with it
+off: the jagged edge at the right is gone).
+
+If the corruption comes back with this, it's in the terrain code after
+all; `NABOO_NO_TERRAIN_WIDEN=1` is the test.
 
 ## 2026-11-01, round 22: widescreen that widens, and a HUD that lines up
 
