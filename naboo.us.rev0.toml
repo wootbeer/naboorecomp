@@ -358,3 +358,9 @@ text = "    { extern void naboo_restore_terrain(uint8_t *rdram); naboo_restore_t
 func = "func_4000BB00"
 before_vram = 0x4000BB00
 text = "    { extern void naboo_check_scissor_rect(uint8_t *rdram, recomp_context *ctx); naboo_check_scissor_rect(rdram, ctx); }"
+
+# NABOO_HEAP_CHECK=2 checks the heap on every allocation (src/game/heap_check.cpp).
+[[patches.hook]]
+func = "func_4000193C"
+before_vram = 0x4000193C
+text = "    { extern void naboo_heap_check_alloc(uint8_t *rdram); naboo_heap_check_alloc(rdram); }"

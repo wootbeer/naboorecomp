@@ -70,12 +70,15 @@ namespace {
     }
 }
 
+extern "C" void naboo_heap_check(uint8_t* rdram, const char* place);
+
 extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     if ((uint32_t)ctx->r4 != 0x4007D9B0) {
         return;
     }
 
     // Built once a frame, before its display list goes to RT64.
+    naboo_heap_check(rdram, "the frame's start (func_4001A078)");
     const bool cutscene = in_cutscene(rdram);
     rt64_keep_original_aspect = cutscene;
 
@@ -144,6 +147,7 @@ namespace {
 }
 
 extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr camera) {
+    naboo_heap_check(rdram, "the terrain's start (func_4104E8CC)");
     static const bool off = switched_off("NABOO_NO_TERRAIN_WIDEN");
     saved_corners.camera = 0;
     const uint32_t camera_address = (uint32_t)camera;
@@ -206,6 +210,7 @@ extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr camera) {
 // Puts the 4:3 corners back, unless the camera has set new ones meanwhile (the terrain code can
 // wait on the display list pool's lock, and other threads run then).
 extern "C" void naboo_restore_terrain(uint8_t* rdram) {
+    naboo_heap_check(rdram, "the terrain's end (func_4104E8CC)");
     if (saved_corners.camera == 0) {
         return;
     }

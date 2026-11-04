@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 23)
+## Overview (as of round 24)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,26 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-04, round 24: a heap checker
+
+The user's next test (round 23's build): the terrain reached both sides, then
+a freeze (the thread dump lists OSThreads at `0x80267238` and `0x802D03E8`
+full of garbage) and a crash in `func_4000193C` reading `0xA0000000`.
+`func_4000193C` is the game's allocator (`func_40001AFC` frees): it walks
+the heap's blocks, 16-byte headers (+0 the data's size, +8 flags: 1 free,
+2 used, 8 the end; +9 a tag), each followed by its data, so the next header
+is at header + 0x10 + size. A header had been overwritten. Round 22's cell
+rectangle at `0xA0000000` fits the same picture.
+
+`src/game/heap_check.cpp` walks the heaps (from the pointers at `0x4007B178`,
+`0x4007B164` and `0x4007B160`) with `NABOO_HEAP_CHECK=1`: once a frame (the
+projection hook) and at the terrain builder's entry and exit; `=2` adds
+every allocation (a hook at `func_4000193C`). The first broken header is
+reported once, with where it was found, the last check that passed, and
+the block before it (header and last 0x80 bytes, usually the one that ran
+over, its tag naming what it was allocated for). Here the first heap holds
+about 300 blocks; 20 minutes of checks found nothing.
 
 ## 2026-11-03, round 23: the terrain's widening, made safe
 
