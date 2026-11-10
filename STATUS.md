@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 24)
+## Overview (as of round 25)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,32 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-10, round 25: no game thread burns a core while waiting
+
+Checked after BattleTanx GA's round 188 (its main thread used ~93% of a
+core at all times, through a yield hook that returned at once and was called
+back to back). Here, under Xvfb with software rendering, per thread
+(`top -H`) and with gdb backtrace samples of the busiest game thread:
+
+- LucasArts logo: busiest game thread 33%, the process manager
+  (`func_41009EDC`) handing off between the game's processes with
+  `osSendMesg`/`osRecvMesg`.
+- Title (a live 3D attract demo of Theed): the scene's process thread 24-36%;
+  in 15 of 20 samples it was asleep on a futex (blocked in a message wait).
+- Select Game (a 3D preview plays in the circle): 31%; 19 of 25 samples
+  blocked in `osRecvMesg` from `func_400065D8` (a non-blocking receive, which
+  in the runtime hands the CPU to ready threads and sleeps), the rest in the
+  scene's own code (`func_4108E8A0`).
+- Every other game thread: 0-1%. Most of the process's CPU here is llvmpipe
+  rendering in software.
+
+So no thread spins: the busy ones sleep most of the time and work the rest.
+The busy-wait hooks this project added (round 12 `func_40037A60`, round 18
+`func_40033584`) and its `osYieldThread` (lib-patches/N64ModernRuntime/0002)
+call `yield_self_1ms`, which sleeps until the next external message (at most
+1 ms) on every call, so none returns at once the way BattleTanx's did. Nothing
+changed.
 
 ## 2026-11-04, round 24: a heap checker
 
