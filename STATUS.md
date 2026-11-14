@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 25)
+## Overview (as of round 26)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,131 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-14, round 26: the heap corruption found; audio headroom and a limiter; loads 6x faster; no thread spinning
+
+**The heap corruption, found** (rounds 22-24's garbage cell rectangle,
+freezes and crashes in open levels). The heap checker caught it here, 8.5
+minutes into a soak of this round's build:
+
+    [NABOO HEAP] heap 0 broken, found at the terrain's end (func_4104E8CC)
+    (last good check: the terrain's start): bad size, block 80223900
+    block before it: 80223410, size 4E0, flags 02
+
+The block before it is the terrain's row tables, its last words
+`00240001 08000000 10000000 10000000`, and the broken header's size was
+`10000000` too. `func_4104EA9C` allocates 0x4E0 bytes for four tables of
+each grid row's first and last column (two shorts a row): two of 100 rows
+for the fine level of detail (pointers at `0x40099128`, `0x4009912C`) and
+two of 56 for the coarse one (`0x40099130`, `0x40099134`, at +0x320 and
++0x400). After filling the rows a footprint covers, the game marks the
+three rows past the last one as empty (first 0x1000, last 0: `func_4104E374`
+at `0x4104E7EC` for the fine level). A footprint whose last coarse row is 53
+puts the third mark in entry 56 of the last table, which is the next heap
+block's size. The 4:3 footprint reaches about row 47 (round 23's numbers:
+47 without widening, 52 with, in a short run), so the original never gets
+there; the widescreen one does, now and then. Round 23 had the right suspect
+and missed it: the tables were traced by 256-byte block, and one entry over
+the end is in the same block as the table's own last entries.
+
+Fix: the block is 0x1000 bytes and each table 256 rows, by patching the
+four instructions in `func_4104EA9C` that size and place them (0x4E0,
++0x190, +0x320, +0x400 to 0x1000, +0x400, +0x800, +0xC00); the tables are
+only reached through their pointers.
+
+Checked by forcing it: `NABOO_TERRAIN_TEST_SCALE=1.6` widens the footprint
+that much more, and with `NABOO_HEAP_CHECK=2` (every allocation) the coarse
+level's last row reached 66 and the fine level's 117, both past the old
+tables, through 60,000 clean checks. A plain 13-minute soak (170,000 checks)
+was clean too, though its coarse level only got to row 52. The fine level's
+117 is past the 100 rows the game itself expects (it caps one of its own
+row counts at 100), so the terrain's widening now stops at 16:9
+(`naboo_widen_terrain`): at 16:9 the fine level reaches row 89. On a wider
+window the terrain ends where a 16:9 window's sides would be.
+
+**The crackle at loud moments.** The game's own mix passes full scale: with
+room to spare, the crawl's theme peaks at 49,872 against 32,767 (1.5x). The
+microcode adds its voices into 16-bit buffers with saturating adds, so
+those peaks came out flat-topped (465 clipped frames in the crawl), which is
+the crackle; an emulator does the same (round 21). Now:
+
+- The mix is made at a quarter of its level. Each voice's volumes are a
+  ramp in the audio task's data: four 16.16 start values and four per-sample
+  steps at the start of each 0x50-byte voice, 32 voices to a 0xA28-byte
+  frame block after its 0x28-byte header (the task's data size is the
+  number of blocks, 3 here). The microcode reads the voices with DMAs, and
+  a new callback in the RSP interpreter (`dmaRead`, `lib-patches/rt64/0027`)
+  shifts the ramps right by 2 in the copy it gets (`src/game/rsp_audio.cpp`,
+  `NABOO_AUDIO_HEADROOM=0..3`). Everything after the ramps is linear, so the
+  output is the same mix 12 dB down, with nothing saturating (the crawl's
+  peak: 12,468, and 24,836 with a shift of 1). Changing the ramps in RAM
+  for the length of the task was tried first and dropped: the game writes
+  the next frame's voices while a task runs.
+- `queue_samples` (`src/main/main.cpp`) makes up the gain in floating point
+  and limits: the sound is delayed 48 frames (2 ms), the gain follows the
+  loudest frame in that window down (so it's there before the peak goes
+  out) and recovers over 150 ms. The crawl now peaks at 0.97 of full scale
+  with no clipped samples; its loudest second is 1.5 dB quieter than before
+  (it was clipping), the rest unchanged. `NABOO_AUDIO_LIMITED_OUT=file`
+  saves what goes to the sound card.
+
+Still there, and older than this round: about 30 of the crawl run's 12,000
+buffers are copies of an earlier one (round 20's stale buffers), all at
+screen changes.
+
+**Loads.** `NABOO_PERF=1` now also reports every wait of 250 ms or more
+between two graphics tasks ("the game sent no graphics task for N ms").
+From boot into a mission those added up to 7.7 s, 3.0 s of it loading the
+level. The time went into sleeps: only one game thread runs at a time, and
+`yield_self_1ms` (behind `osYieldThread` when no other thread is ready)
+slept up to 1 ms on every call, with every other game thread stopped. The
+file loader yields constantly: its I/O thread after each chunk
+(`func_40005170`), its manager thread (`func_40004308`) on every pass of a
+loop that runs while any request is pending, the sound engine after each
+batch. By call site, 3,800 sleeps each for the first two on the way into a
+mission.
+
+`yield_self_1ms` now sleeps only when nothing has happened since the
+calling thread's previous yield (`lib-patches/N64ModernRuntime/0012`): a
+counter, `ultramodern_activity`, counts events delivered from outside the
+game threads and ROM reads started, and the manager loop's hook adds a
+change in its eight request slots (`src/game/loader_progress.cpp`; the
+runtime can't see that loop's own progress). Switches between game threads
+don't count: counting them let two polling threads keep each other awake.
+Result: 7.7 s of waits down to 1.3 s; the level load 3.0 s to about 0.35 s
+(`NABOO_YIELD_ALWAYS_SLEEP=1` gives the old behaviour to compare).
+
+Tried on the way: skipping the sleep whenever the thread had sent or
+received a message or 100 us had passed (loads as fast, but a thread took
+89% of a core at the title: the game's mutexes are message queues, so every
+poll "did something"), and skipping it only after a ROM read (half the
+gain: most of the manager's passes aren't next to a read).
+
+**Two loops that spin.** Round 25 found no thread near 100% and called the
+busiest one's 24-36% work. It wasn't: with the sleeps gone it went to
+80-89%, and gdb showed two loops with no wait in them, which the loader's
+sleeps had been slowing down by accident:
+
+- `func_4108E8A0` (the title's and menus' scene loop) polls its message
+  queue without waiting (`func_400065D8`) and goes straight back when
+  there's nothing to draw. Hook at `0x4108EA04`: yield when `$s4` is clear.
+- `func_41009EDC`, a priority-4 worker thread that brings in the scene's
+  pending items when there's memory to spare: lock, walk the list, unlock,
+  again. Hooks: a pass that brought nothing in yields before the next.
+
+**Where a slow frame goes.** `NABOO_PERF=1` now reports each end of frame of
+30 ms or more with the parts of `State::fullSync` that took over 1 ms
+("slow end of frame, 120 ms: decoding textures 3, waiting for the render
+thread 110"), from marks RT64 leaves through `rt64_perf_mark`
+(`lib-patches/rt64/0027`): checking the tiles, starting the uploads, the
+ubershader's pipelines, rendering to RAM, decoding textures, uploading draw
+data, uploading textures, preparing the workload, waiting for the render
+thread. For the user's 100-200 ms spikes, which don't happen here.
+
+Per-thread CPU now (Xvfb, software rendering): title and Select Game 1.2-1.5%
+for the busiest game thread (24-36% before), in play 2% (57% before, 78%
+without the hooks). Checked: boot, menus, the crawl, a mission; a 10-minute
+soak in play with `NABOO_HEAP_CHECK=1`.
 
 ## 2026-11-10, round 25: no game thread burns a core while waiting
 

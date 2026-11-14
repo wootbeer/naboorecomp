@@ -155,7 +155,18 @@ extern "C" void naboo_widen_terrain(uint8_t* rdram, gpr camera) {
         return;
     }
 
-    const float scale = widescreen_scale();
+    // Testing switch: NABOO_TERRAIN_TEST_SCALE=1.5 widens the footprint that much more, to
+    // reach rows of the terrain's tables that play rarely does (STATUS.md round 26).
+    static const float test_scale = [] {
+        const char* value = std::getenv("NABOO_TERRAIN_TEST_SCALE");
+        const float factor = (value != nullptr) ? static_cast<float>(std::atof(value)) : 1.0f;
+        return (factor >= 1.0f && factor <= 4.0f) ? factor : 1.0f;
+    }();
+    // No wider than 16:9: the rows the footprint covers grow with it (the fine level's last
+    // row: 82 at 4:3, 89 at 16:9, 117 at 1.6 times that), the game expects 100 at most, and
+    // 16:9 is what has been played and soaked. On a wider window the terrain ends where the
+    // sides of a 16:9 one would be.
+    const float scale = std::min(widescreen_scale(), (16.0f / 9.0f) / (4.0f / 3.0f)) * test_scale;
     if (in_cutscene(rdram) || (scale == 1.0f)) {
         return;
     }

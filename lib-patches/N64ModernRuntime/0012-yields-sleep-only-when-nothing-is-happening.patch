@@ -1,0 +1,128 @@
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 43509ba..baf9a88 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include <memory>
+ #include <fstream>
+ #include <array>
+@@ -266,7 +267,11 @@ void ultramodern::join_saving_thread() {
+     }
+ }
+ 
++// Counts what moves the game along, for yield_self_1ms (ultramodern's scheduling.cpp).
++extern std::atomic<uint32_t> ultramodern_activity;
++
+ void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
++    ultramodern_activity++;
+     // TODO asynchronous transfer
+     // TODO implement unaligned DMA correctly
+     if (direction == 0) {
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 9944a02..4eba281 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include <bitset>
+ #include <thread>
+ 
+@@ -37,11 +38,18 @@ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool
+ 
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
+ 
++// Counts what moves the game along (scheduling.cpp, yield_self_1ms). Here: an event from
++// outside the game threads delivered to a queue.
++extern std::atomic<uint32_t> ultramodern_activity;
++
+ void dequeue_external_messages(RDRAM_ARG1) {
+     QueuedMessage to_send;
+     std::vector<QueuedMessage> requeued_messages{};
+     while (external_messages.try_dequeue(to_send)) {
+-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++        if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
++            ultramodern_activity++;
++        }
++        else if (to_send.requeue_if_blocked) {
+             requeued_messages.push_back(to_send);
+         }
+     }
+@@ -53,7 +61,10 @@ void dequeue_external_messages(RDRAM_ARG1) {
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+     QueuedMessage to_send;
+     external_messages.wait_dequeue(to_send);
+-    if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++    if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
++        ultramodern_activity++;
++    }
++    else if (to_send.requeue_if_blocked) {
+         external_messages.enqueue(to_send);
+     }
+ }
+@@ -61,7 +72,10 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+     QueuedMessage to_send;
+     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+-        if (!do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false) && to_send.requeue_if_blocked) {
++        if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
++            ultramodern_activity++;
++        }
++        else if (to_send.requeue_if_blocked) {
+             external_messages.enqueue(to_send);
+         }
+     }
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..e21e308 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -1,3 +1,5 @@
++#include <atomic>
++#include <cstdlib>
+ #include "ultramodern/ultramodern.hpp"
+ 
+ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+@@ -6,6 +8,12 @@ void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
+     TO_PTR(OSThread, t_)->state = OSThreadState::QUEUED;
+ }
+ 
++// Counts what moves the game along: an event delivered from outside the game threads
++// (mesgqueue.cpp), a ROM or save read or write started (librecomp's pi.cpp), and what the game's
++// own hooks report. Not switches between game threads: two threads polling for each other
++// would keep each other from ever sleeping.
++std::atomic<uint32_t> ultramodern_activity{0};
++
+ void swap_to_thread(RDRAM_ARG OSThread *to) {
+     debug_printf("[Scheduling] Thread %d giving execution to thread %d\n", TO_PTR(OSThread, ultramodern::this_thread())->id, to->id);
+     // Insert this thread in the running queue.
+@@ -42,7 +50,29 @@ extern "C" void yield_self(RDRAM_ARG1) {
+     ultramodern::check_running_queue(PASS_RDRAM1);
+ }
+ 
++void dequeue_external_messages(RDRAM_ARG1);
++
++// A yield with no other thread to run: delivers pending events and lets a higher-priority
++// thread run. A thread calling it in a loop is waiting for something another thread or an
++// event will change. While nothing has happened since its previous call (no event came in, no
++// read started, no progress reported by a hook: ultramodern_activity), the call first sleeps
++// until the next event, 1 ms at most, so the loop doesn't burn a core. When something has, it
++// returns at once: only one game thread runs at a time, so a sleep here stops all of them,
++// and Battle for Naboo's file loader yields after every chunk it reads and every step of a
++// request (asleep at each one, a level took 3 s to load instead of 0.4 s).
++// NABOO_YIELD_ALWAYS_SLEEP=1 sleeps on every call, as before, for comparison.
+ extern "C" void yield_self_1ms(RDRAM_ARG1) {
+-    ultramodern::wait_for_external_message_timed(PASS_RDRAM1, 1);
++    static const bool always_sleep = getenv("NABOO_YIELD_ALWAYS_SLEEP") != nullptr;
++    thread_local uint32_t last_activity = 0;
++    const uint32_t activity = ultramodern_activity.load(std::memory_order_relaxed);
++    if ((activity == last_activity) || always_sleep) {
++        ultramodern::wait_for_external_message_timed(PASS_RDRAM1, 1);
++    }
++    else {
++        dequeue_external_messages(PASS_RDRAM1);
++    }
++
++    // As it was when this call began: what happens during it counts for the next one.
++    last_activity = activity;
+     ultramodern::check_running_queue(PASS_RDRAM1);
+ }

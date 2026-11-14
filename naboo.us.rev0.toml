@@ -56,6 +56,28 @@ func = "func_40033584"
 before_vram = 0x40033600
 text = "    if (ctx->r17 != 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
 
+# func_4108E8A0 (the menus' and the title's scene loop): polls its message queue without
+# waiting (func_400065D8) and, with nothing to draw ($s4 clear), goes straight back to poll
+# again (STATUS.md round 26).
+[[patches.hook]]
+func = "func_4108E8A0"
+before_vram = 0x4108EA04
+text = "    if (ctx->r20 == 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
+
+# func_41009EDC: a low-priority worker thread (priority 4) that brings in the scene's
+# pending items (func_41009BE8 for each, while there's memory to spare). Its loop never
+# waits: lock, go through the list, unlock, again, which takes a whole core here. A pass
+# that brought nothing in now yields before the next one (STATUS.md round 26).
+[[patches.hook]]
+func = "func_41009EDC"
+before_vram = 0x41009F9C
+text = "    { extern int naboo_worker_busy; naboo_worker_busy = 1; }"
+
+[[patches.hook]]
+func = "func_41009EDC"
+before_vram = 0x4100A06C
+text = "    { extern int naboo_worker_busy; extern void yield_self_1ms(uint8_t *rdram); if (!naboo_worker_busy) { yield_self_1ms(rdram); } naboo_worker_busy = 0; }"
+
 # func_400376A8: the sound engine's once-a-VI pass, which refills the audio
 # buffers played since the last one. Notes where its cursor starts, for
 # src/game/audio_ring.cpp (STATUS.md round 20).
@@ -350,6 +372,33 @@ func = "func_4104E8CC"
 before_vram = 0x4104EA94
 text = "    { extern void naboo_restore_terrain(uint8_t *rdram); naboo_restore_terrain(rdram); }"
 
+# The terrain's row tables: one 0x4E0-byte block holding four tables of each row's first and
+# last column, two of 100 rows for the fine level of detail and two of 56 for the coarse one
+# (pointers at 0x40099128-0x40099134). The game marks three rows past the last one it covers,
+# so a footprint reaching the coarse level's row 53 writes entry 56 of the last table: the
+# next heap block's header. The 4:3 footprint stops at about row 47; the widescreen one gets
+# there (the level 2 freezes and crashes, STATUS.md round 26). Here the block is 0x1000 bytes
+# and each table 256 rows: the four instructions that size and place them in func_4104EA9C.
+[[patches.instruction]]
+func = "func_4104EA9C"
+vram = 0x4104EB78
+value = 0x24041000 # addiu $a0, $zero, 0x1000 (0x4E0)
+
+[[patches.instruction]]
+func = "func_4104EA9C"
+vram = 0x4104EB8C
+value = 0x24430400 # addiu $v1, $v0, 0x400 (0x190)
+
+[[patches.instruction]]
+func = "func_4104EA9C"
+vram = 0x4104EB98
+value = 0x24430800 # addiu $v1, $v0, 0x800 (0x320)
+
+[[patches.instruction]]
+func = "func_4104EA9C"
+vram = 0x4104EBA8
+value = 0x24420C00 # addiu $v0, $v0, 0xC00 (0x400)
+
 # func_4000BB00 writes a scissor from a cell's screen rectangle (a1). Rarely, in
 # open levels, it has been handed a pointer that isn't in RAM, and the game
 # crashed or froze (STATUS.md round 22). Until the cause is found, such a
@@ -364,3 +413,11 @@ text = "    { extern void naboo_check_scissor_rect(uint8_t *rdram, recomp_contex
 func = "func_4000193C"
 before_vram = 0x4000193C
 text = "    { extern void naboo_heap_check_alloc(uint8_t *rdram); naboo_heap_check_alloc(rdram); }"
+
+# The file loader's manager loop, before its osYieldThread: a change in its request slots
+# counts as activity for the runtime's yield, which otherwise sleeps (src/game/loader_progress.cpp,
+# STATUS.md round 26).
+[[patches.hook]]
+func = "func_40004308"
+before_vram = 0x40004590
+text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_progress(rdram); }"

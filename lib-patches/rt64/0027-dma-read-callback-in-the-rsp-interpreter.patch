@@ -1,3 +1,86 @@
+diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
+index a92478b..de08728 100644
+--- a/src/gbi/rt64_gbi_f3dnaboo.cpp
++++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
+@@ -13,6 +13,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <string>
+ #include <vector>
+ 
+ #include "hle/rt64_interpreter.h"
+@@ -33,6 +34,9 @@ extern "C" uint32_t rt64_auto_anchor_serial;
+ extern "C" float rt64_aspect_ratio_scale;
+ extern "C" float rt64_ext_aspect_percentage;
+ 
++// Timing marks within State::fullSync (hle/rt64_state.cpp).
++extern void (*rt64_perf_mark)(const char *name);
++
+ // Called by NABOO_PERF's watchdog when no graphics task has finished for 3 s, for the game
+ // to report its own state (its threads).
+ extern "C" void (*rt64_stall_callback)(void) = nullptr;
+@@ -189,6 +193,30 @@ namespace RT64 {
+                 void add(double ms) { total += ms; worst = std::max(worst, ms); }
+             };
+ 
++            // Where a slow end of frame went: the marks State::fullSync leaves (rt64_perf_mark), each
++            // naming what was done since the mark before.
++            struct Mark { const char *name; std::chrono::steady_clock::time_point time; };
++            static std::vector<Mark> marks;
++            static void mark(const char *name) {
++                marks.push_back({ name, std::chrono::steady_clock::now() });
++            }
++
++            static void reportSlowFrameEnd(std::chrono::steady_clock::time_point start, double ms) {
++                std::string line;
++                auto last = start;
++                for (const Mark &m : marks) {
++                    const double part = std::chrono::duration<double, std::milli>(m.time - last).count();
++                    last = m.time;
++                    if (part >= 1.0) {
++                        char text[96];
++                        snprintf(text, sizeof(text), "%s%s %.0f", line.empty() ? "" : ", ", m.name, part);
++                        line += text;
++                    }
++                }
++
++                fprintf(stderr, "[NABOO PERF] slow end of frame, %.0f ms: %s\n", ms, line.empty() ? "no part over 1 ms" : line.c_str());
++            }
++
+             static void taskDone(double taskMs) {
+                 static Stat task, microcode, rdp, frameEnd;
+                 static int tasks = 0;
+@@ -199,6 +227,13 @@ namespace RT64 {
+                 tasks++;
+                 lastProgressMs = nowMs();
+                 const auto now = std::chrono::steady_clock::now();
++                // A long wait for the game between two tasks: loading, or a game thread held up.
++                static auto lastDone = now;
++                const double waitedMs = std::chrono::duration<double, std::milli>(now - lastDone).count() - taskMs;
++                lastDone = now;
++                if (waitedMs >= 250.0) {
++                    fprintf(stderr, "[NABOO PERF] the game sent no graphics task for %.0f ms\n", waitedMs);
++                }
+                 if (now - last >= std::chrono::seconds(2)) {
+                     fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s, ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
+                         tasks, std::chrono::duration<double>(now - last).count(), task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
+@@ -230,9 +265,15 @@ namespace RT64 {
+             }
+ 
+             Perf::phase = frameEnd ? Perf::FrameEnd : Perf::RDPCommands;
++            Perf::marks.clear();
++            rt64_perf_mark = Perf::mark;
+             const auto t0 = std::chrono::steady_clock::now();
+             state->ext.interpreter->processRDPLists(start, dlStart, dlEnd);
+             const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++            if (frameEnd && (ns >= 30000000ULL)) {
++                Perf::reportSlowFrameEnd(t0, ns / 1e6);
++            }
++
+             (frameEnd ? Perf::frameEndNs : Perf::rdpNs) += ns;
+             Perf::phase = Perf::Microcode;
+         }
 diff --git a/src/gbi/rt64_rsp_interpreter.cpp b/src/gbi/rt64_rsp_interpreter.cpp
 index 71d5ced..47d1fbe 100644
 --- a/src/gbi/rt64_rsp_interpreter.cpp
@@ -28,3 +111,82 @@ index 1c9b96b..8911566 100644
          RSPInterpreter();
          void reset();
          void setHook(uint32_t imemAddress, bool enabled);
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 6c1f71a..422240b 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -35,6 +35,11 @@ extern "C" bool rt64_keep_original_aspect;
+ // the middle; a game whose letterbox isn't centered sets the middle of its picture).
+ extern "C" float rt64_fill_width_center = 0.5f;
+ 
++// Timing marks within State::fullSync, for a caller that wants to know where a slow frame's time went
++// (null when nobody does).
++void (*rt64_perf_mark)(const char *name) = nullptr;
++#define RT64_PERF_MARK(name) do { if (rt64_perf_mark != nullptr) { rt64_perf_mark(name); } } while (0)
++
+ namespace RT64 {
+     const float ShiftScaleMap[] = {
+         1.0f,
+@@ -1128,6 +1133,7 @@ namespace RT64 {
+             }
+         }
+ 
++        RT64_PERF_MARK("checking the tiles");
+         // Ensure there's as many GPU tiles as call tiles available in the vector.
+         workload.drawData.gpuTiles.resize(workload.drawData.callTiles.size());
+ 
+@@ -1154,6 +1160,7 @@ namespace RT64 {
+             rspProcessor->process(rspParams);
+         }
+ 
++        RT64_PERF_MARK("starting the uploads");
+         // Switch the data ranges.
+         uint32_t loadOpCursor = uint32_t(workload.drawRanges.loadOperations.first);
+         uint32_t rdpTileCursor = uint32_t(workload.drawRanges.rdpTiles.first);
+@@ -1163,6 +1170,7 @@ namespace RT64 {
+         // Make sure pipelines for the ubershader have been created before rendering. This condition is executed regardless
+         // of whether rendering to RAM is active so the workload queue is guaranteed to have the pipelines ready as well.
+         ext.rasterShaderCache->shaderUber->waitForPipelineCreation();
++        RT64_PERF_MARK("the ubershader's pipelines");
+ 
+         if (renderToRDRAM) {
+             const hlslpp::float2 resolutionScale(1.0f, 1.0f);
+@@ -1571,6 +1579,7 @@ namespace RT64 {
+ 
+             // Render any remaining batches of framebuffers.
+             renderAndSynchronize(workload.fbPairCount);
++            RT64_PERF_MARK("rendering to RAM");
+         }
+         else {
+             // Process all tiles.
+@@ -1578,6 +1587,7 @@ namespace RT64 {
+                 fullSyncFramebufferPairTiles(workload, workload.fbPairs[f], loadOpCursor, rdpTileCursor);
+             }
+ 
++            RT64_PERF_MARK("decoding textures");
+             // Do not render anything, just wait for the data to be uploaded.
+             ext.framebufferGraphicsWorker->commandList->begin();
+             ext.drawDataUploader->commandListBeforeBarriers(ext.framebufferGraphicsWorker);
+@@ -1590,8 +1600,10 @@ namespace RT64 {
+             ext.drawDataUploader->wait();
+             ext.transformsUploader->wait();
+             ext.framebufferGraphicsWorker->execute();
++            RT64_PERF_MARK("uploading draw data");
+             ext.framebufferGraphicsWorker->wait();
+             ext.textureCache->waitForGPUUploads();
++            RT64_PERF_MARK("uploading textures");
+         }
+ 
+         // Evict from the texture cache that are too old and should no longer be maintained.
+@@ -1786,9 +1798,11 @@ namespace RT64 {
+             }
+         }
+         
++        RT64_PERF_MARK("preparing the workload");
+         // Advance the workload queue at the end of a full synchronization.
+         advanceWorkload(workload, false);
+         ext.workloadQueue->advanceToNextWorkload();
++        RT64_PERF_MARK("waiting for the render thread");
+ 
+         // Make sure the profiler starts after the workload is advanced to ignore any waiting time.
+         dlCpuProfiler.reset();
