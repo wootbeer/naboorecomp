@@ -175,6 +175,41 @@ lost its HUD anchoring for a frame. Out of play now takes three lists in a
 row without a count (`rt64_gbi_f3dnaboo.cpp`); in play the count stays at 0.
 A likely part of the user's remaining hitches and of HUD flicker.
 
+**Craft select's text came apart** (user's screenshot: "P RIMARY WEAPON:
+BLASTER S", the outer letters out at the sides). The HUD anchoring again, as
+on the pause menu in round 22: the screen is drawn a letter at a time, in
+play mode (the mode word is 0) and in the mission's own scene, so nothing
+round 22 tested told it from play. Two tests now, in
+`naboo_widen_projection`: frames made while the menus' scene loop is going
+round (`naboo_menu_loop_ticks`, counted by `func_4108E8A0`'s hook: the title
+and the menus' 3D previews), and frames between the start of a front-end
+scene's message thread (`func_410A6778`, started by the logos, the title and
+craft select, never by a mission; its hook sets `naboo_in_front_end`) and
+the mission's opening cutscene or the scene's end (`0x41001028`). Checked:
+the text is whole, and the HUD is at the sides again once the mission
+starts. A mission entered with no opening cutscene would keep its HUD at the
+4:3 positions; none seen.
+
+**The user's run of this build** (naboo_test4.txt, an RX 5700 XT): no heap
+error in about 135,000 checks, no freeze or crash; every wait between tasks
+under 0.4 s; in play (211 two-second lines) no task rendered to RAM, the
+median worst task 7 ms and the worst of the whole run 15 ms (rounds 22-24:
+96-216 ms now and then), end of frame 2 ms, microcode 4.4 ms on average,
+which is now most of a frame's cost. "It did seem to run better overall."
+
+**Open, from the same run:**
+
+- Black squares where an effect should be (the user's clip: a turret under
+  fire in a snow level, a square about the turret's size with sparks in it,
+  a seam down its middle, for a second or so). A sprite's texture drawn
+  solid: its black isn't being blended or cut out. Only sometimes, so
+  probably one of the two ways a triangle gets drawn (the 3D hook, or the
+  microcode's own RDP triangle when the vertices aren't the hooked ones)
+  loses the blend, or a texture load lands late. Not reproduced here yet.
+- Distant objects (buildings, trees) appearing in the middle of the screen.
+  Not the widescreen culling of round 22, which was at the sides; likely the
+  game's own draw distance. To check against an emulator before changing.
+
 Per-thread CPU now (Xvfb, software rendering): title and Select Game 1.2-1.5%
 for the busiest game thread (24-36% before), in play 2% (57% before, 78%
 without the hooks). Checked: boot, menus, the crawl, a mission; a 10-minute
