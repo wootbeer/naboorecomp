@@ -58,11 +58,12 @@ text = "    if (ctx->r17 != 0) { extern void yield_self_1ms(uint8_t *rdram); yie
 
 # func_4108E8A0 (the menus' and the title's scene loop): polls its message queue without
 # waiting (func_400065D8) and, with nothing to draw ($s4 clear), goes straight back to poll
-# again (STATUS.md round 26).
+# again (STATUS.md round 26). Each pass is also counted: a frame made while this loop is
+# running is a menu's, not a mission's, and gets no HUD anchoring (src/game/widescreen.cpp).
 [[patches.hook]]
 func = "func_4108E8A0"
 before_vram = 0x4108EA04
-text = "    if (ctx->r20 == 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
+text = "    { extern uint32_t naboo_menu_loop_ticks; naboo_menu_loop_ticks++; } if (ctx->r20 == 0) { extern void yield_self_1ms(uint8_t *rdram); yield_self_1ms(rdram); }"
 
 # func_41009EDC: a low-priority worker thread (priority 4) that brings in the scene's
 # pending items (func_41009BE8 for each, while there's memory to spare). Its loop never
@@ -124,7 +125,7 @@ text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0
 [[patches.hook]]
 func = "func_4100096C"
 before_vram = 0x41001028
-text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
+text = "    { extern int naboo_in_front_end; naboo_in_front_end = 0; } { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
 
 # func_4001A078 builds a perspective matrix (matrix, fov, aspect, near, far);
 # the camera's (at 0x4007D9B0) is widened for widescreen here, so that the
@@ -421,3 +422,12 @@ text = "    { extern void naboo_heap_check_alloc(uint8_t *rdram); naboo_heap_che
 func = "func_40004308"
 before_vram = 0x40004590
 text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_progress(rdram); }"
+
+# func_410A6778 is the thread a front-end scene (the logos, the title, craft select) starts
+# to handle its messages; a mission's scene doesn't have one. From its start until the scene
+# loop leaves the scene (the hook at 0x41001028 above clears it), frames get no HUD
+# anchoring: craft select's text would come apart (src/game/widescreen.cpp, STATUS.md round 26).
+[[patches.hook]]
+func = "func_410A6778"
+before_vram = 0x410A6778
+text = "    { extern int naboo_in_front_end; naboo_in_front_end = 1; }"

@@ -71,6 +71,8 @@ namespace {
 }
 
 extern "C" void naboo_heap_check(uint8_t* rdram, const char* place);
+// Counted by the hook in the menus' scene loop (func_4108E8A0, naboo.us.rev0.toml).
+extern "C" { uint32_t naboo_menu_loop_ticks = 0; int naboo_in_front_end = 0; } // set by func_410A6778's hook, cleared here and at 0x41001028
 
 extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     if ((uint32_t)ctx->r4 != 0x4007D9B0) {
@@ -86,7 +88,19 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     // framebuffer, is anchored to the sides for the HUD setting to spread it out
     // (lib-patches/rt64/0026, rt64_auto_anchor_fb_width). Not paused: the pause menu's text
     // is drawn a letter at a time, and would come apart.
-    rt64_auto_anchor_fb_width = (MEM_W(0, (gpr)(int32_t)0x4005C84C) == 0) ? 400 : 0;
+    // Nor on the menus' 3D screens (the title, craft select), whose text would come apart
+    // the same way: their scene loop (func_4108E8A0) has gone round since the last frame, which
+    // it never does during a mission (naboo_menu_loop_ticks, counted by its hook).
+    static uint32_t last_menu_ticks = 0;
+    const bool in_menu = (naboo_menu_loop_ticks != last_menu_ticks);
+    last_menu_ticks = naboo_menu_loop_ticks;
+    // Craft select isn't in that loop, and is the same scene as its mission. It's a front-end
+    // screen from the start of its message thread (func_410A6778's hook sets
+    // naboo_in_front_end) until the mission's opening cutscene, or until the scene is left.
+    if (cutscene) {
+        naboo_in_front_end = 0;
+    }
+    rt64_auto_anchor_fb_width = ((MEM_W(0, (gpr)(int32_t)0x4005C84C) == 0) && !in_menu && !naboo_in_front_end) ? 400 : 0;
     rt64_auto_anchor_serial++;
     const float scale = widescreen_scale();
     if (cutscene || (scale == 1.0f)) {
