@@ -16,6 +16,60 @@
 #include "librecomp/rsp.hpp"
 #include "gbi/rt64_rsp_interpreter.h"
 
+// Headroom for the mix (STATUS.md round 26). The microcode adds its voices into 16-bit buffers
+// with saturating adds, and the game's own levels pass full scale at loud moments (the crawl's
+// theme peaks at 1.5 times full scale, as on an emulator), which is heard as crackle. Each
+// voice's volumes are a ramp in the task's data: four 16.16 start values and four per-sample
+// steps, at the start of each 0x50-byte voice (32 to a 0xA28-byte frame block, after its
+// 0x28-byte header; the task's data size is the number of blocks). The microcode reads the
+// voices with DMAs; the ramps are divided by 1 << naboo_audio_headroom_shift in the copy it
+// gets (RDRAM is left alone: the game writes the next frame's voices while a task runs). The
+// mix comes out that much quieter with nothing saturating, and queue_samples
+// (src/main/main.cpp) makes up the gain in floating point, through a limiter.
+// NABOO_AUDIO_HEADROOM=0 turns it off (0-3; 2 by default, 12 dB).
+extern "C" int naboo_audio_headroom_shift = [] {
+    const char* value = getenv("NABOO_AUDIO_HEADROOM");
+    const int shift = (value != nullptr) ? atoi(value) : 2;
+    return (shift < 0) ? 0 : ((shift > 3) ? 3 : shift);
+}();
+
+// What the last task's mix was divided by, as a shift (0 for a task whose ramps weren't found).
+extern "C" int naboo_audio_applied_shift = 0;
+
+namespace {
+    constexpr uint32_t frame_block_size = 0xA28;
+    constexpr uint32_t voices_offset = 0x28;
+    constexpr uint32_t voice_size = 0x50;
+    constexpr uint32_t ramp_bytes = 0x20;
+
+    struct RampScaler {
+        uint32_t data = 0;
+        uint32_t end = 0;
+        int shift = 0;
+        uint32_t scaled = 0;
+    };
+
+    void scale_ramps_read(RT64::RSPInterpreter* rsp, uint32_t mem_address, uint32_t dram_address, uint32_t length, void* user_data) {
+        RampScaler& scaler = *static_cast<RampScaler*>(user_data);
+        if ((mem_address & 0x1000) != 0 || dram_address + length <= scaler.data || dram_address >= scaler.end) {
+            return;
+        }
+        for (uint32_t i = 0; i + 4 <= length; i += 4) {
+            const uint32_t address = dram_address + i;
+            if (address < scaler.data || address >= scaler.end || (address & 3) != 0) {
+                continue;
+            }
+            const uint32_t in_block = (address - scaler.data) % frame_block_size;
+            if (in_block < voices_offset || ((in_block - voices_offset) % voice_size) >= ramp_bytes) {
+                continue;
+            }
+            const int32_t value = static_cast<int32_t>(rsp->dmemWord(mem_address + i));
+            rsp->setDMEMWord(mem_address + i, static_cast<uint32_t>(value >> scaler.shift));
+            scaler.scaled++;
+        }
+    }
+}
+
 RspExitReason musyx_audio_interpreted(uint8_t* rdram, uint32_t ucode_addr) {
     (void)ucode_addr;
     static RT64::RSPInterpreter* rsp = nullptr;
@@ -85,8 +139,24 @@ RspExitReason musyx_audio_interpreted(uint8_t* rdram, uint32_t ucode_addr) {
         memset(dmem, 0, 0xFC0);
     }
 
+    static RampScaler scaler;
+    const uint32_t blocks = rsp->dmemWord(0xFC0 + 0x34);
+    scaler.data = rsp->dmemWord(0xFC0 + 0x30) & 0x7FFFFF;
+    scaler.end = scaler.data + ((blocks <= 16) ? blocks : 0) * frame_block_size;
+    scaler.shift = naboo_audio_headroom_shift;
+    scaler.scaled = 0;
+    rsp->dmaRead = (scaler.shift != 0) ? scale_ramps_read : nullptr;
+    rsp->dmaReadUserData = &scaler;
+
     rsp->setPc(0);
     const RT64::RSPInterpreter::Result result = rsp->run(50000000ULL);
+    // A task that read no ramps mixed no voices, so its (silent) output needs no gain either way.
+    if (scaler.scaled != 0) {
+        naboo_audio_applied_shift = scaler.shift;
+    }
+    else if (scaler.shift == 0) {
+        naboo_audio_applied_shift = 0;
+    }
     if (result != RT64::RSPInterpreter::Result::Broke) {
         fprintf(stderr, "The audio microcode didn't finish task %d (stopped at IMEM 0x%03X).\n", task_count, rsp->pc);
         if (dump_fail) {

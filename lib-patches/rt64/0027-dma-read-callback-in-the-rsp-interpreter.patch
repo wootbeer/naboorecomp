@@ -1,0 +1,30 @@
+diff --git a/src/gbi/rt64_rsp_interpreter.cpp b/src/gbi/rt64_rsp_interpreter.cpp
+index 71d5ced..47d1fbe 100644
+--- a/src/gbi/rt64_rsp_interpreter.cpp
++++ b/src/gbi/rt64_rsp_interpreter.cpp
+@@ -125,6 +125,9 @@ namespace RT64 {
+                 }
+                 else {
+                     memcpy(memRow, dramRow, rowLength);
++                    if (dmaRead != nullptr) {
++                        dmaRead(this, (dmaMemAddress & 0x1000) | (memAddress & 0xFFF), dramStart, rowLength, dmaReadUserData);
++                    }
+                 }
+ 
+                 memAddress += rowLength;
+diff --git a/src/gbi/rt64_rsp_interpreter.h b/src/gbi/rt64_rsp_interpreter.h
+index 1c9b96b..8911566 100644
+--- a/src/gbi/rt64_rsp_interpreter.h
++++ b/src/gbi/rt64_rsp_interpreter.h
+@@ -66,6 +66,11 @@ namespace RT64 {
+         void (*rdpCommands)(RSPInterpreter *interpreter, uint32_t start, uint32_t end, void *userData) = nullptr;
+         void *rdpUserData = nullptr;
+ 
++        // Called after each row a DMA has read into DMEM or IMEM (memAddress with 0x1000 set
++        // for IMEM), so the caller can alter what the microcode sees without touching RDRAM.
++        void (*dmaRead)(RSPInterpreter *interpreter, uint32_t memAddress, uint32_t dramAddress, uint32_t length, void *userData) = nullptr;
++        void *dmaReadUserData = nullptr;
++
+         RSPInterpreter();
+         void reset();
+         void setHook(uint32_t imemAddress, bool enabled);

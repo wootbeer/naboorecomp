@@ -11,6 +11,7 @@
 // customization (the library's default_launcher_init_callback runs).
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -341,6 +342,8 @@ static bool open_audio_device(uint32_t frequency) {
     return true;
 }
 
+extern "C" int naboo_audio_applied_shift; // src/game/rsp_audio.cpp
+
 static void queue_samples(int16_t* audio_data, size_t sample_count) {
     if (audio_device == 0) {
         return;
@@ -350,10 +353,44 @@ static void queue_samples(int16_t* audio_data, size_t sample_count) {
     // word-swapped, so the two 16-bit halves read back right-then-left.
     static std::vector<float> buffer;
     buffer.resize(sample_count);
-    float scale = static_cast<float>(recompui::config::sound::get_main_volume() / 100.0) / 32768.0f;
+    // The mix arrives quieter by the headroom it was given (src/game/rsp_audio.cpp); the gain is
+    // made up here, and what would pass full scale goes through a limiter instead of clipping.
+    // The limiter looks 48 frames (about 2 ms) ahead: the sound is delayed by that much, and the
+    // gain starts down as a peak comes in, so it's there when the peak goes out; it recovers
+    // over about 150 ms.
+    const float makeup = static_cast<float>(1 << naboo_audio_applied_shift) / 32768.0f;
+    const float volume = static_cast<float>(recompui::config::sound::get_main_volume() / 100.0);
+    constexpr size_t lookahead = 48;
+    static float delay_line[lookahead * 2] = {};
+    static size_t delay_pos = 0;
+    static float limiter_gain = 1.0f;
+    const float ceiling = 0.97f;
+    const float attack = 1.0f - std::exp(-1.0f / (static_cast<float>(lookahead) / 5.0f));
+    const float release = 1.0f - std::exp(-1.0f / (0.150f * static_cast<float>(game_frequency)));
     for (size_t i = 0; i + 1 < sample_count; i += 2) {
-        buffer[i + 0] = audio_data[i + 1] * scale;
-        buffer[i + 1] = audio_data[i + 0] * scale;
+        const float left = audio_data[i + 1] * makeup;
+        const float right = audio_data[i + 0] * makeup;
+        const float out_left = delay_line[delay_pos * 2 + 0];
+        const float out_right = delay_line[delay_pos * 2 + 1];
+        delay_line[delay_pos * 2 + 0] = left;
+        delay_line[delay_pos * 2 + 1] = right;
+        // The loudest frame of those waiting in the delay line (the one going in included).
+        float peak = 0.0f;
+        for (size_t j = 0; j < lookahead * 2; j++) {
+            peak = std::max(peak, std::fabs(delay_line[j]));
+        }
+        const float target = (peak > ceiling) ? (ceiling / peak) : 1.0f;
+        limiter_gain += (target - limiter_gain) * ((target < limiter_gain) ? attack : release);
+        delay_pos = (delay_pos + 1) % lookahead;
+        buffer[i + 0] = std::clamp(out_left * limiter_gain, -1.0f, 1.0f) * volume;
+        buffer[i + 1] = std::clamp(out_right * limiter_gain, -1.0f, 1.0f) * volume;
+    }
+
+    // Testing switch: NABOO_AUDIO_LIMITED_OUT=file saves what goes to the sound card (32-bit float stereo).
+    static FILE* limited_out = [] { const char* v = std::getenv("NABOO_AUDIO_LIMITED_OUT"); return v != nullptr ? fopen(v, "wb") : nullptr; }();
+    if (limited_out != nullptr) {
+        fwrite(buffer.data(), sizeof(float), sample_count, limited_out);
+        fflush(limited_out);
     }
 
     // Testing switch: NABOO_AUDIO_OUT=file saves what the game makes (16-bit stereo, left first,
