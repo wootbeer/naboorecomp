@@ -190,6 +190,29 @@ the text is whole, and the HUD is at the sides again once the mission
 starts. A mission entered with no opening cutscene would keep its HUD at the
 4:3 positions; none seen.
 
+Second pass: the user's next build still had the text apart (their route to
+craft select wasn't the one tested; a capture of theirs, replayed here,
+drew it whole). The thread test is gone. Comparing RAM between captures of
+craft select (theirs and one made here) and of missions (theirs, two made
+here) gave a direct one: the camera's first word (`0x4004C67C`) is a pointer
+in a mission and 0 on craft select and the menus. Anchoring now needs it
+set (plus play mode and no menu loop).
+
+**Replaying a capture.** F12 already saved a frame's RAM and task
+(`gfx_<n>.rdram`, `.txt`). `NABOO_REPLAY_GFX=<the .rdram>` with
+`NABOO_REPLAY_FB=<its color image>` now replays one: on F11 (or from the
+`NABOO_REPLAY_AT`-th task) the game stops in the task launcher's hook for
+good, and the capture's RAM is loaded, its task started and its framebuffer
+shown, in a loop (`src/game/gfx_dump.cpp`). Start it in the same kind of
+screen as the capture (the video mode isn't captured). Letting the game run
+on after loading the RAM crashed it at once, hence the loop. The user's
+"black box" capture (gfx_10429) replays with the turret's explosion drawn
+right, so it missed the box or the box needs state from earlier frames; its
+particles (`05000088`) pick their render mode by the flag at DMEM 0x11C
+(`B984001C 00504A50` translucent, `B904001C 00550210` opaque), which the
+display list flips per object, so an opaque draw of a spark texture would
+be exactly a black square. Not pinned down yet.
+
 **The user's run of this build** (naboo_test4.txt, an RX 5700 XT): no heap
 error in about 135,000 checks, no freeze or crash; every wait between tasks
 under 0.4 s; in play (211 two-second lines) no task rendered to RAM, the
@@ -206,6 +229,13 @@ which is now most of a frame's cost. "It did seem to run better overall."
   probably one of the two ways a triangle gets drawn (the 3D hook, or the
   microcode's own RDP triangle when the vertices aren't the hooked ones)
   loses the blend, or a texture load lands late. Not reproduced here yet.
+- The stray column on "A long time ago...": reproduced here. It's a
+  400-wide screen (not 640 as round 22 had it), the column is at x = 388 of
+  400 (3 window pixels wide at 1280), single pixels of assorted colours down
+  most of the height, on alternate frames. Not its text rectangles (they
+  span x = 120 to 282); the frame also draws about 1100 triangles.
+- Mines swapping places and flickering spherical explosions (the user's
+  second clip): not looked at yet.
 - Distant objects (buildings, trees) appearing in the middle of the screen.
   Not the widescreen culling of round 22, which was at the sides; likely the
   game's own draw distance. To check against an emulator before changing.

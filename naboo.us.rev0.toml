@@ -125,7 +125,7 @@ text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0
 [[patches.hook]]
 func = "func_4100096C"
 before_vram = 0x41001028
-text = "    { extern int naboo_in_front_end; naboo_in_front_end = 0; } { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
+text = "    { extern int naboo_intro_skip; if (naboo_intro_skip) { if (MEM_BU(-0X347A, (gpr)(int32_t)0x40050000) == 20) ctx->r2 = 1; else naboo_intro_skip = 0; } }"
 
 # func_4001A078 builds a perspective matrix (matrix, fov, aspect, near, far);
 # the camera's (at 0x4007D9B0) is widened for widescreen here, so that the
@@ -422,12 +422,3 @@ text = "    { extern void naboo_heap_check_alloc(uint8_t *rdram); naboo_heap_che
 func = "func_40004308"
 before_vram = 0x40004590
 text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_progress(rdram); }"
-
-# func_410A6778 is the thread a front-end scene (the logos, the title, craft select) starts
-# to handle its messages; a mission's scene doesn't have one. From its start until the scene
-# loop leaves the scene (the hook at 0x41001028 above clears it), frames get no HUD
-# anchoring: craft select's text would come apart (src/game/widescreen.cpp, STATUS.md round 26).
-[[patches.hook]]
-func = "func_410A6778"
-before_vram = 0x410A6778
-text = "    { extern int naboo_in_front_end; naboo_in_front_end = 1; }"
