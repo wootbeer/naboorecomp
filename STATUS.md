@@ -164,6 +164,17 @@ ubershader's pipelines, rendering to RAM, decoding textures, uploading draw
 data, uploading textures, preparing the workload, waiting for the render
 thread. For the user's 100-200 ms spikes, which don't happen here.
 
+**Frames in play taken as out of play.** The task line of `NABOO_PERF` now
+counts the tasks rendered to RAM too, and in play it wasn't 0: up to 5 in
+60. Round 22's test for "in play" was a new camera count
+(`rt64_auto_anchor_serial`) since the last display list, but the game
+thread runs ahead of RT64's: the count for the next frame can arrive before
+this frame's list is run, and the next frame then finds none. Each such
+frame was rendered a second time to RAM (the stall round 22 removed) and
+lost its HUD anchoring for a frame. Out of play now takes three lists in a
+row without a count (`rt64_gbi_f3dnaboo.cpp`); in play the count stays at 0.
+A likely part of the user's remaining hitches and of HUD flicker.
+
 Per-thread CPU now (Xvfb, software rendering): title and Select Game 1.2-1.5%
 for the busiest game thread (24-36% before), in play 2% (57% before, 78%
 without the hooks). Checked: boot, menus, the crawl, a mission; a 10-minute
