@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 34)
+## Overview (as of round 35)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,43 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 35: how a Rogue Squadron recomp does it (ideas for the next attempt)
+
+The user pointed to two Rogue Squadron recomps (same Factor 5 engine and
+microcode family). `sp00nznet/rogue-squadron-recomp` (MIT) has nothing on
+interpolation. `MikeSemicolonD/RogueSquadron64Recomp` (GPL-3: ideas only,
+no code from it) documents its approach in
+`.claude/skills/roguesquadron-frame-interpolation/SKILL.md`. What it says
+that bears on rounds 28-34 here:
+
+- **No separate camera.** Projection = the perspective matrix, view =
+  identity, every modelview stays in camera space; the camera's motion is
+  interpolated per object. (Round 28's form, which round 30 left for a
+  view from the camera object: the source of the seams and the sky.)
+- **Identity from the scene graph**, not from draw order, matrix slot,
+  display list address or a bare heap pointer (it lists those as dead
+  ends that mispair on spawn and despawn; rounds 30-33 used three of
+  them). It hooks the scene graph's traversal and records the node each
+  matrix slot is for, with a generation that changes when the slot becomes
+  another thing (pool reuse, teleport, grid re-center).
+- **Terrain**: the root node's id, with the grid's re-centering either
+  compensated or given a new generation. Vertex interpolation for terrain
+  is a dead end (tile vertices change every frame).
+- **Unpaired is drawn at the current frame**, and an object that flips
+  between paired and unpaired oscillates: the "jitter in place" seen here.
+- **Sprites, camera-facing quads, things with motion baked into their
+  vertices, constant-depth draws** each needed their own identity or
+  handling. A long list.
+- **Rate**: a majority vote over recent VI factors, and each real frame
+  tweened over its own VI count.
+- Its interpolation is off by default in code.
+
+So the next attempt here: camera-space modelviews under the perspective
+projection; find this game's scene graph traversal (the draw entries of
+`func_40008F40` come from it) and take the node per matrix there; a
+generation per node; the terrain's root with re-centering handled; and
+measure pairing (paired/total per class, flips) before judging by eye.
 
 ## 2026-11-15, round 34: the frames as the game makes them by default; F10 for the new path
 
