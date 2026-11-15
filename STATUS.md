@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 29)
+## Overview (as of round 30)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,62 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 30: interpolation with the camera apart and objects by identity; squares and streaks found
+
+The user on round 28's build: "interpolation is so bad now. everything is
+jittering", and the laser "comes out from behind your model".
+
+**Round 28's check was void.** The test window's frame-rate setting gives
+RT64 a target rate of 0, so no frames were matched or generated there, and
+`RT64_ONLY_HALFWAY_FRAMES` showed the game's own frames. New test switches
+(`lib-patches/rt64/0030`): `RT64_TEST_TARGET_RATE=60` gives it a rate;
+`RT64_ONLY_HALFWAY_FRAMES=2` shows a halfway frame and one of the game's
+alternately (steps of 1.5 and 0.5 frames: `/tmp/nw/interp.py` measures
+them); `RT64_TEST_NO_FRAME_SKIP=1`. With `msaa None` and `res Original` in
+`graphics.json` lavapipe keeps up.
+
+**The jitter.** Real halfway frames showed the terrain in shards. The
+modelviews of round 28 still had the camera in them, and the terrain is
+made again every frame around the camera. Now:
+
+- `naboo_camera_for_task` (hook in the task launcher `func_40023558`)
+  gives RT64 the frame's display list address with the perspective matrix,
+  a view matrix built from the camera object (`0x40060DBC`: eye, forward,
+  up; checked on a capture: object matrices x inverse(P) x inverse(V) come
+  out as clean world matrices), and the frame's object matrices.
+- The module loads view x projection as RT64's projection and each object's
+  world matrix as its model matrix.
+- Geometry the microcode generates (commands `05` and `BE`, hooks at IMEM
+  `0x1A60`/`0x1B08`, cleared at the command loop `0x1038`) is in a group
+  that isn't interpolated: drawn as made, under the interpolated camera.
+- Objects are followed by identity: the four places that write the matrix
+  command call `naboo_object_matrix(matrix, object pointer)`; the module
+  finds a matrix by its contents. Pool slots are reused (an ember, then a
+  bolt), so an object is followed only if it was drawn the two frames
+  before and moves, turns and keeps its size as it did (`followObject`),
+  and not when the number of matrices under its pointer changed.
+
+**Squares and the streak weren't interpolation** (rounds 27-28 said they
+were). Both show on the game's own frames here when firing the secondary
+weapon, and not in replays of the same frames:
+
+- Streak from behind the craft: ultramodern told the game the RSP was done
+  before the display list was read, and the game reused short-lived data.
+  `lib-patches/N64ModernRuntime/0013`: done after `send_dl`
+  (`NABOO_SP_COMPLETE_EARLY=1` is the old order).
+- Flat squares: without render to RAM (in play since round 25) nothing
+  marked a frame's textures as used until the workload queue rendered it,
+  and the eviction at the end of the display list removed a texture drawn
+  again after a pause. `State::fullSync` now marks them first.
+
+**Open.** The replay tool (`NABOO_REPLAY_GFX`) no longer shows in-play
+captures (the screen stays on the last live frame, with or without
+`NABOO_SP_COMPLETE_EARLY=1`); a menu capture replays. So the user's six
+wipe captures (`gfx_1414`...`gfx_1949`) aren't looked at yet: 1414, 1445
+and 1482 draw to a 512-wide menu framebuffer, 1734, 1811 and 1949 to the
+400-wide one (1811 in cinematic mode). Sprites (snow) aren't moved in
+generated frames.
 
 ## 2026-11-15, round 29: snow to the picture's sides
 
