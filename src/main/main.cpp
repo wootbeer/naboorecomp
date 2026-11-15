@@ -217,11 +217,15 @@ static int SDLCALL close_watch(void*, SDL_Event* event) {
 // F12 saves the next graphics task for offline study (src/game/gfx_dump.cpp).
 extern "C" void naboo_request_gfx_dump();
 extern "C" void naboo_request_gfx_replay(); // F11, with NABOO_REPLAY_GFX
+extern "C" void naboo_toggle_smooth_frames(); // F10: RT64 moves objects in the frames it generates, or not
 void naboo_install_exit_trace();
 uint32_t naboo_ai_events_allowed(); // src/game/audio_ring.cpp
 static int dump_key_watch(void*, SDL_Event* event) {
     if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F12 && event->key.repeat == 0) {
         naboo_request_gfx_dump();
+    }
+    if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F10 && event->key.repeat == 0) {
+        naboo_toggle_smooth_frames();
     }
     if (event->type == SDL_KEYDOWN && event->key.keysym.sym == SDLK_F11 && event->key.repeat == 0) {
         naboo_request_gfx_replay();

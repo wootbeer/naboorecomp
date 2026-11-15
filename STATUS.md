@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 33)
+## Overview (as of round 34)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,35 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 34: the frames as the game makes them by default; F10 for the new path
+
+The user, four times over rounds 30-33: everything was better before
+these rounds (only some mines, buildings and ships flashed); now parts
+come apart, buildings jitter, frame pacing seems worse. Round 33's build
+didn't change that ("buildings are still coming apart").
+
+So the default is back to no camera for RT64: every matrix combined,
+nothing moved in generated frames (they show the game's frames as made),
+as before round 28. `NABOO_SMOOTH=1`, or F10 while playing
+(`naboo_toggle_smooth_frames`), gives RT64 the camera and objects as in
+rounds 28-33, to compare the two live. Kept on in both: the texture
+eviction fix (the likely cause of the old flashing), the sprite widening
+(snow), the RSP done when the display list is read (the bolt streak; it
+shows here at once with `NABOO_SP_COMPLETE_EARLY=1`).
+
+**Why rounds 28-33 went badly, and the next attempt.** Everything was
+inferred from finished matrices: the camera from a camera object that
+isn't exactly the frame's, identity from pool pointers and draw order,
+"standing still" from differences. Each inference had exceptions that
+showed as a new fault. Other recomps tag matrices where the game builds
+them. The same here means finding where the game multiplies an object's
+own matrix by the view-projection (before the `0105C03F` command), and
+taking from there the world matrix, the exact view and projection of the
+frame, and an identity from the object itself. Not started.
+
+Frame pacing isn't measured yet (frame intervals in the PERF line: to do).
+`gfx_39402.zip` unzipped to `/tmp/nw/up4`, not analysed.
 
 ## 2026-11-15, round 33: the view's rotation from the frame; what's made afresh isn't followed
 

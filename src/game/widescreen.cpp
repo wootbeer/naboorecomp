@@ -17,6 +17,7 @@
 // (0x4005C84C = 7) nothing is widened, and RT64 shows those frames at their original
 // shape (rt64_keep_original_aspect, lib-patches/rt64/0026).
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -334,6 +335,18 @@ extern "C" void naboo_object_matrix(uint8_t* rdram, gpr matrix, gpr object, gpr 
     }
 }
 
+// F10 turns it on and off while playing, to compare the two.
+static std::atomic<bool> naboo_smooth_frames{ []() {
+    const char* value = std::getenv("NABOO_SMOOTH");
+    return (value != nullptr) && (value[0] == '1');
+}() };
+
+extern "C" void naboo_toggle_smooth_frames() {
+    const bool on = !naboo_smooth_frames.load();
+    naboo_smooth_frames = on;
+    fprintf(stderr, "[NABOO] smooth frames (F10): %s\n", on ? "on" : "off");
+}
+
 extern "C" void naboo_camera_for_task(uint8_t* rdram) {
     constexpr gpr kCurrentTask = (gpr)(int32_t)0x40080120;
     const gpr task = (gpr)(int32_t)MEM_W(0, kCurrentTask);
@@ -347,7 +360,11 @@ extern "C" void naboo_camera_for_task(uint8_t* rdram) {
     }
 
     // No projection built since the last task: no camera for this one (a frame without the 3D scene).
-    if (!camera_snapshot_valid || !camera_snapshot_in_play) {
+    // Off unless NABOO_SMOOTH=1 or F10 (STATUS.md round 34): with a camera RT64 moves objects and the
+    // view in the frames it generates between the game's, and that isn't yet as good as showing
+    // the game's frames as they are, which is what happens without one.
+    const bool smooth = naboo_smooth_frames.load();
+    if (!smooth || !camera_snapshot_valid || !camera_snapshot_in_play) {
         camera_snapshot_valid = false;
         frame_matrices.clear();
         frame_ids.clear();
