@@ -422,3 +422,12 @@ text = "    { extern void naboo_heap_check_alloc(uint8_t *rdram); naboo_heap_che
 func = "func_40004308"
 before_vram = 0x40004590
 text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_progress(rdram); }"
+
+# func_4001A078, once its perspective matrix is complete ($s0 the matrix, before the
+# function's exit): the camera's (0x4007D9B0) goes to RT64, which takes each object's
+# combined matrix apart with it for frame interpolation (src/game/widescreen.cpp,
+# lib-patches/rt64/0030, STATUS.md round 27).
+[[patches.hook]]
+func = "func_4001A078"
+before_vram = 0x4001A128
+text = "    { extern void naboo_projection_built(uint8_t *rdram, gpr matrix); naboo_projection_built(rdram, ctx->r16); }"

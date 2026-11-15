@@ -36,14 +36,10 @@ extern "C" uint32_t rt64_auto_anchor_serial;
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
 
-    // No frames generated between the game's own (it runs at 30 a second in play). On a display
-    // faster than that RT64 was making them, from draws it can't match between frames here (the
-    // microcode hands it finished matrices, with no identity for the objects): mines swapping
-    // places, flickering explosions, groups of fighters flashing, a spark's quad drawn solid
-    // black for a moment. Captures of those frames replay clean one at a time (STATUS.md
-    // round 27). NABOO_INTERPOLATION=1 turns the in-between frames back on.
+    // Testing switch: NABOO_INTERPOLATION=0 has RT64 make no frames between the game's own
+    // (30 a second in play), to tell a fault in a frame from one in the frames made between.
     const char* interpolation = std::getenv("NABOO_INTERPOLATION");
-    rt64_no_interpolated_frames = !((interpolation != nullptr) && (interpolation[0] == '1'));
+    rt64_no_interpolated_frames = (interpolation != nullptr) && (interpolation[0] == '0');
 
     // Cutscenes fill the window's width, cutting off some of their letterbox. It isn't
     // centered (the picture is framebuffer lines 55-399 of 448), so neither is the cut.
@@ -275,4 +271,21 @@ extern "C" void naboo_check_scissor_rect(uint8_t* rdram, recomp_context* ctx) {
         }
         ctx->r5 = (gpr)(int32_t)0x4004CD28;
     }
+}
+// The camera's perspective matrix (16 floats at 0x4007D9B0), as func_4001A078 finishes it, goes
+// to RT64: with it each object's combined matrix comes apart into a projection and a modelview,
+// which RT64 needs to move objects and the camera between two of the game's frames
+// (lib-patches/rt64/0030).
+extern "C" void rt64_set_game_projection(const float* matrix);
+
+extern "C" void naboo_projection_built(uint8_t* rdram, gpr matrix) {
+    if ((uint32_t)matrix != 0x4007D9B0) {
+        return;
+    }
+
+    float values[16];
+    for (int i = 0; i < 16; i++) {
+        values[i] = to_float((uint32_t)MEM_W(i * 4, matrix));
+    }
+    rt64_set_game_projection(values);
 }

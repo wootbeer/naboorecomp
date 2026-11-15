@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 27)
+## Overview (as of round 28)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,43 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 28: generated frames back on, with objects RT64 can follow
+
+The user wants the high frame rate, not round 27's switch-off ("i don't
+want to turn frame interp off... i want to improve it like our other
+recomps"). So generated frames are on by default again
+(`NABOO_INTERPOLATION=0` turns them off), and the objects are now given to
+RT64 in the form it needs to move them between two of the game's frames.
+
+The microcode gets one finished matrix per object (camera and projection
+already multiplied in), which is why nothing could be paired up. Now:
+
+- The game's perspective matrix (float 4x4 at `0x4007D9B0`, built by
+  `func_4001A078`) is passed to RT64 as it's built (hook at `0x4001A128`,
+  `naboo_projection_built` -> `rt64_set_game_projection`). It's kept
+  transposed relative to the objects' matrices, and those end in 256 rather
+  than 1, so the projection's last row is scaled by 256.
+- For each object matrix, `loadSeparateMatrices` (`lib-patches/rt64/0030`)
+  computes modelview = combined x inverse(projection). If no perspective is
+  left in it (last column 0,0,0,1), RT64 gets the projection and the
+  modelview separately, in a group it matches automatically; otherwise (HUD
+  models, anything with another projection) the combined matrix as before,
+  not moved between frames. The latest two projections are tried.
+- In play about 20 matrices a frame come apart and one stays combined
+  (`NABOO_PERF=1` prints both counts). The picture is unchanged.
+
+Checked here with a new test switch, `RT64_ONLY_HALFWAY_FRAMES=1`, which
+shows only the frame generated halfway between two of the game's (the test
+window can't show generated frames at speed): a minute of flying and firing
+in the first mission, objects, terrain and HUD all in place. Not checked
+here: the user's scenes (turret fire, mines, sphere explosions, fighter
+groups). `RT64_NABOO_COMBINED_MATRICES=1` is the old behaviour.
+
+Next if identical objects still swap: RT64 pairs objects by the nearest
+match; a fixed identity per object can come from the game's draw entries
+(the object pointer at +0x10 of the entry in `func_40008F40`, the four
+places that write the `0105C03F` matrix command).
 
 ## 2026-11-15, round 27: no frames generated between the game's own
 
