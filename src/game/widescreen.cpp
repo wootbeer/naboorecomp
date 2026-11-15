@@ -30,10 +30,20 @@ extern "C" bool rt64_game_widens_projection;
 extern "C" bool rt64_keep_original_aspect;
 extern "C" float rt64_fill_width_center;
 extern "C" uint32_t rt64_auto_anchor_fb_width;
+extern "C" bool rt64_no_interpolated_frames;
 extern "C" uint32_t rt64_auto_anchor_serial;
 
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
+
+    // No frames generated between the game's own (it runs at 30 a second in play). On a display
+    // faster than that RT64 was making them, from draws it can't match between frames here (the
+    // microcode hands it finished matrices, with no identity for the objects): mines swapping
+    // places, flickering explosions, groups of fighters flashing, a spark's quad drawn solid
+    // black for a moment. Captures of those frames replay clean one at a time (STATUS.md
+    // round 27). NABOO_INTERPOLATION=1 turns the in-between frames back on.
+    const char* interpolation = std::getenv("NABOO_INTERPOLATION");
+    rt64_no_interpolated_frames = !((interpolation != nullptr) && (interpolation[0] == '1'));
 
     // Cutscenes fill the window's width, cutting off some of their letterbox. It isn't
     // centered (the picture is framebuffer lines 55-399 of 448), so neither is the cut.

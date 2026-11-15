@@ -1,0 +1,39 @@
+diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
+index bccc061..15f172e 100644
+--- a/src/hle/rt64_rdp.cpp
++++ b/src/hle/rt64_rdp.cpp
+@@ -30,6 +30,10 @@
+ // See RDP::drawTexRect: the framebuffer width a game's HUD is anchored in (0: none).
+ extern "C" uint32_t rt64_auto_anchor_fb_width = 0;
+ 
++// Set by a game whose draws can't be matched from one frame to the next yet: no frames are
++// generated in between its own (WorkloadQueue), whatever the display's rate.
++extern "C" bool rt64_no_interpolated_frames = false;
++
+ // Counted by the game each time it sets rt64_auto_anchor_fb_width for a frame.
+ extern "C" uint32_t rt64_auto_anchor_serial = 0;
+ 
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index c1f71c7..82a3f5b 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -17,6 +17,10 @@ extern "C" float rt64_aspect_ratio_scale = 1.0f;
+ extern "C" bool rt64_keep_original_aspect = false;
+ extern "C" float rt64_ext_aspect_percentage = 0.0f;
+ 
++// Set by a game whose draws can't be matched from one frame to the next yet: no frames are
++// generated in between its own, whatever the display's rate (hle/rt64_rdp.cpp).
++extern "C" bool rt64_no_interpolated_frames;
++
+ namespace RT64 {
+     // WorkloadQueue
+ 
+@@ -1014,7 +1018,7 @@ namespace RT64 {
+                     matchingProfiler.log();
+ 
+                     const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
+-                    generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
++                    generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty() && !rt64_no_interpolated_frames;
+ 
+                     const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal;
+                     if (resetTicks) {

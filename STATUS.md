@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 26)
+## Overview (as of round 27)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,35 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 27: no frames generated between the game's own
+
+The user's twelve captures (F12 during black squares on a turret, mines
+changing places, a flickering spherical explosion; a snow level) were
+replayed one at a time (`NABOO_REPLAY_GFX`): every one draws right, the
+turret's fire, the mines and the sphere included. So the faults aren't in a
+frame, they're between frames, as the user guessed ("frame interp
+swapping?", also for groups of fighters flashing).
+
+RT64 generates frames between the game's when the display's rate is above
+the game's (`WorkloadQueue`, `generateInterpolatedFrames`), matching each
+draw to one in the previous frame. Round 15 set every matrix to
+`G_EX_ID_IGNORE` so nothing would be tweened, but the in-between frames
+were still made, from draws that can't be matched here: the microcode hands
+RT64 finished matrices with no identity for the objects, and the list of
+objects changes from frame to frame. A new switch,
+`rt64_no_interpolated_frames` (`lib-patches/rt64/0029`), stops them;
+`naboo_widescreen_init` sets it, and `NABOO_INTERPOLATION=1` clears it. Not
+confirmed here (the faults were never seen here: the test window's display
+isn't faster than the game); for the user to check. The real fix is the
+high frame rate work: objects with an identity from one frame to the next.
+
+Still open from the same report:
+
+- Snow reaches both sides in the cutscene before play (4:3 picture filling
+  the width) and stops short of them in play. Its flakes are placed for the
+  4:3 view; like the terrain, they need the wider one.
+- Screen wipes and transitions in play cover the 4:3 area only.
 
 ## 2026-11-14, round 26: the heap corruption found; audio headroom and a limiter; loads 6x faster; no thread spinning
 
