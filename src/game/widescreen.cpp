@@ -34,8 +34,15 @@ extern "C" uint32_t rt64_auto_anchor_fb_width;
 extern "C" bool rt64_no_interpolated_frames;
 extern "C" uint32_t rt64_auto_anchor_serial;
 
+extern "C" void (*rt64_display_list_read_callback)();
+extern "C" void ultramodern_display_list_read();
+
 void naboo_widescreen_init() {
     rt64_game_widens_projection = true;
+
+    // The game is told its RSP task is done when RT64 has read the task's display list
+    // (lib-patches/N64ModernRuntime/0013, STATUS.md rounds 30-31).
+    rt64_display_list_read_callback = &ultramodern_display_list_read;
 
     // Testing switch: NABOO_INTERPOLATION=0 has RT64 make no frames between the game's own
     // (30 a second in play), to tell a fault in a frame from one in the frames made between.
@@ -81,6 +88,21 @@ extern "C" void naboo_heap_check(uint8_t* rdram, const char* place);
 // Counted by the hook in the menus' scene loop (func_4108E8A0, naboo.us.rev0.toml).
 extern "C" { uint32_t naboo_menu_loop_ticks = 0; }
 
+// The camera object as the frame's projection is built (see naboo_camera_for_task): by the
+// time the task starts the game can have moved the camera on for the next frame, and a view
+// from the wrong frame put the frames RT64 generates somewhere else altogether.
+namespace {
+    float camera_snapshot[9];
+    bool camera_snapshot_valid = false;
+}
+
+static void naboo_camera_snapshot(uint8_t* rdram) {
+    for (int i = 0; i < 9; i++) {
+        camera_snapshot[i] = to_float((uint32_t)MEM_W(i * 4, (gpr)(int32_t)0x40060DBC));
+    }
+    camera_snapshot_valid = true;
+}
+
 extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     if ((uint32_t)ctx->r4 != 0x4007D9B0) {
         return;
@@ -88,6 +110,7 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
 
     // Built once a frame, before its display list goes to RT64.
     naboo_heap_check(rdram, "the frame's start (func_4001A078)");
+    naboo_camera_snapshot(rdram);
     const bool cutscene = in_cutscene(rdram);
     rt64_keep_original_aspect = cutscene;
 
@@ -312,10 +335,16 @@ extern "C" void naboo_camera_for_task(uint8_t* rdram) {
         projection[i] = to_float((uint32_t)MEM_W(i * 4, (gpr)(int32_t)0x4007D9B0));
     }
 
-    float camera[9];
-    for (int i = 0; i < 9; i++) {
-        camera[i] = to_float((uint32_t)MEM_W(i * 4, (gpr)(int32_t)0x40060DBC));
+    // No projection built since the last task: no camera for this one (a frame without the 3D scene).
+    if (!camera_snapshot_valid) {
+        frame_matrices.clear();
+        frame_ids.clear();
+        return;
     }
+
+    float camera[9];
+    std::memcpy(camera, camera_snapshot, sizeof(camera));
+    camera_snapshot_valid = false;
 
     const float* eye = &camera[0];
     const float* forward = &camera[3];

@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 30)
+## Overview (as of round 31)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,53 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 31: what jittered: the radar, the sky, and a freeze
+
+The user on round 30's build: "jitter is so bad. its everything", "even
+hud", and it "wasn't bad at all before our changes". Round 30 had checked
+single halfway frames and never a sequence. New tests (in `/tmp/nw`, not
+kept): hold a turn and measure how far the picture moves each displayed
+frame (`turn.py`, `reg.py`: with `RT64_ONLY_HALFWAY_FRAMES=2` the steps
+should alternate 1.5 and 0.5 frames, in the sky as on the ground), and
+compare the HUD between consecutive frames (`hud.py`).
+
+- **The HUD's models** (the radar's ring and disc) take a ready-made
+  combined matrix, and with the scene's view x projection now loaded RT64
+  put the camera of the frame in between under them: they slid sideways in
+  turns. The module now loads an identity projection (not followed) for a
+  combined matrix, and the scene's camera has a name of its own
+  (`0xCA3E0000` + epoch) so it's never matched to that identity.
+- **The sky** (and the snow's volume) is centered on the camera, and
+  drawn as made it sat where this frame's camera is while the frames in
+  between look from where it was: it jumped every other frame. What's at
+  the camera across the ground (within 0.25; generated geometry in height
+  too, as the terrain's origin comes close now and then) is followed, by
+  order (`0xCA000000` ids).
+- **Camera.** Snapshot of the camera object taken as the projection is
+  built (`naboo_camera_snapshot`), not at the task's start. A camera that
+  turned more than about 25 degrees or moved more than 150 units since the
+  last frame starts a new epoch: nothing is followed across it.
+  `lerpRigidView` (`rt64_projection_processor.cpp`) blends a rigid,
+  possibly mirrored view by quaternion and camera position, also when RT64
+  moves only one of the two.
+- **A freeze** (seen once here, at a mission's start): round 30 told the
+  game its RSP was done after `send_dl`, which includes rendering to RAM
+  (100+ ms while loading), and the game's scheduler gave up on the task.
+  Now RT64 calls `rt64_display_list_read_callback` (set to
+  `ultramodern_display_list_read`) from `State::fullSync`: before the
+  rendering when rendering to RAM, after the textures are read otherwise.
+- **A wrong turn of mine, undone**: dividing view x projection by 256 (the
+  256 is in the projection's translation row, not its w column) made
+  RT64's view extraction degenerate and gave frames from nowhere.
+
+Checked: 144 consecutive frames (halfway and real alternately) while
+firing, none wrong; sky steps 16/48 px alternately in a turn; radar and
+left HUD identical between frames; five starts without the freeze. Not
+checked: with MSAA (too slow here), other levels, mines and fighters.
+
+**Open.** The wipes (replay tool still not showing in-play captures);
+sprites aren't moved in generated frames.
 
 ## 2026-11-15, round 30: interpolation with the camera apart and objects by identity; squares and streaks found
 

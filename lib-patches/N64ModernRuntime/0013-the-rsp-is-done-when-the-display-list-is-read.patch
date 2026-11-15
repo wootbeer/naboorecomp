@@ -1,5 +1,5 @@
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index d8f33e5..b882130 100644
+index d8f33e5..7a3663b 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -1,3 +1,4 @@
@@ -7,7 +7,25 @@ index d8f33e5..b882130 100644
  #include <thread>
  #include <atomic>
  #include <chrono>
-@@ -380,7 +381,20 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -278,6 +279,17 @@ void sp_complete() {
+     ultramodern::enqueue_external_message_src(events_context.sp.mq, events_context.sp.msg, false, ultramodern::EventMessageSource::Sp);
+ }
+ 
++// Battle for Naboo recomp: the renderer says when it has read the graphics task's display list
++// (through this, set as RT64's rt64_display_list_read_callback by the game), which is when the
++// game is told the RSP is done: see the graphics thread's loop.
++static std::atomic<bool> sp_complete_pending{ false };
++
++extern "C" void ultramodern_display_list_read() {
++    if (sp_complete_pending.exchange(false)) {
++        sp_complete();
++    }
++}
++
+ void dp_complete() {
+     uint8_t* rdram = events_context.rdram;
+     std::lock_guard lock{ events_context.message_mutex };
+@@ -380,7 +392,24 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
                  // is finished as well, so sending this early shouldn't be an issue in most cases.
                  // If this causes issues then the logic can be replaced with responding to yield requests.
@@ -16,7 +34,8 @@ index d8f33e5..b882130 100644
 +                // frame, reusing what the display list still points to for short-lived things (a
 +                // bolt's matrix, an effect's texture), and the renderer, still reading the list, drew
 +                // those from the next frame's data: flat squares, bolts streaking from behind the
-+                // craft. So the RSP is done when the display list has been read.
++                // craft. So the RSP is done when the display list has been read (not when the frame
++                // is finished: that can take long enough for the game to give up on the task).
 +                // NABOO_SP_COMPLETE_EARLY=1 is the stock order.
 +                static const bool sp_complete_early = []() {
 +                    const char* value = std::getenv("NABOO_SP_COMPLETE_EARLY");
@@ -26,16 +45,18 @@ index d8f33e5..b882130 100644
 +                if (sp_complete_early) {
 +                    sp_complete();
 +                }
++                else {
++                    sp_complete_pending = true;
++                }
                  ultramodern::measure_input_latency();
  
                  PTR(u64) displaylist = task_action->task.t.data_ptr;
-@@ -390,6 +404,10 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -390,6 +419,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  renderer_context->send_dl(&task_action->task);
                  [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
  
-+                if (!sp_complete_early) {
-+                    sp_complete();
-+                }
++                // If the renderer didn't say when it had read the list.
++                ultramodern_display_list_read();
 +
                  dp_complete();
                  // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
