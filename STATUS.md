@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 28)
+## Overview (as of round 29)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,25 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 29: snow to the picture's sides
+
+The snow (user: "an inch off either side" in play) is 96 particle commands
+a frame (`05`, sub-mode `0x27`, 32 flakes each, in a box around the camera;
+capture `gfx_2452`). Their positions cover the whole wide view, but the
+microcode draws each as a texture rectangle with depth at the point it
+projected, and with the game's widened projection that point is where the
+squeezed picture has it; RT64 then placed the rectangles like the HUD's, in
+the 4:3 middle. `RDP::drawTexRect` (`lib-patches/rt64/0030`) now stretches
+a rectangle with depth out from the picture's center by the widescreen
+factor (position, width and texture step), with the scissor at the wider
+picture's sides, when the game widens its projection and not in cutscenes.
+`RT64_NO_SPRITE_WIDEN=1` turns it off. Replayed on the user's captures:
+flakes reach both sides, explosions and the HUD unchanged, same frame time.
+
+**Wipes** (4:3 only, same report): not found here. Mission start's fade
+and sliding bars already span the width; a minute of play showed no other.
+Needs an F12 capture during one.
 
 ## 2026-11-15, round 28: generated frames back on, with objects RT64 can follow
 

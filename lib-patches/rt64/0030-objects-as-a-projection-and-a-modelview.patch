@@ -240,6 +240,59 @@ index ac4d898..2b76191 100644
 +extern "C" void rt64_set_game_projection(const float *matrix) {
 +    RT64::GBI_F3DNABOO::setGameProjection(matrix);
 +}
+diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
+index 15f172e..81f9938 100644
+--- a/src/hle/rt64_rdp.cpp
++++ b/src/hle/rt64_rdp.cpp
+@@ -34,6 +34,10 @@ extern "C" uint32_t rt64_auto_anchor_fb_width = 0;
+ // generated in between its own (WorkloadQueue), whatever the display's rate.
+ extern "C" bool rt64_no_interpolated_frames = false;
+ 
++extern "C" bool rt64_game_widens_projection;
++extern "C" bool rt64_keep_original_aspect;
++extern "C" float rt64_aspect_ratio_scale;
++
+ // Counted by the game each time it sets rt64_auto_anchor_fb_width for a frame.
+ extern "C" uint32_t rt64_auto_anchor_serial = 0;
+ 
+@@ -1411,6 +1415,37 @@ namespace RT64 {
+             }
+         }
+ 
++        // A rectangle with depth is a sprite in the world (a snowflake, an explosion), placed by
++        // the game's microcode from a point it projected. When the game widens its own projection
++        // (rt64_game_widens_projection) that point is where the squeezed picture has it, so the
++        // rectangle is stretched back out from the picture's center like the 3D picture is, with
++        // the scissor's sides at the wider picture's. RT64_NO_SPRITE_WIDEN=1 turns it off.
++        static const bool noSpriteWiden = []() {
++            const char *value = getenv("RT64_NO_SPRITE_WIDEN");
++            return (value != nullptr) && (value[0] == '1');
++        }();
++
++        if (!noSpriteWiden && rt64_game_widens_projection && !rt64_keep_original_aspect && (rt64_aspect_ratio_scale > 1.0f) &&
++            (otherMode.zCmp() || otherMode.zUpd()) && (otherMode.cycleType() != G_CYC_COPY) && !flip &&
++            (extended.global.rect.leftOrigin == G_EX_ORIGIN_NONE) && (extended.global.rect.rightOrigin == G_EX_ORIGIN_NONE))
++        {
++            const float scale = rt64_aspect_ratio_scale;
++            const float center = float(width * 4) / 2.0f;
++            const int32_t wideUlx = int32_t(std::lround(center + (float(ulx) - center) * scale));
++            const int32_t wideLrx = int32_t(std::lround(center + (float(lrx) - center) * scale));
++            const int16_t wideDsdx = int16_t(std::lround(float(dsdx) / scale));
++            const uint16_t savedLeft = extended.scissorLeftOriginStack[scissorStackSize - 1];
++            const uint16_t savedRight = extended.scissorRightOriginStack[scissorStackSize - 1];
++            extended.scissorLeftOriginStack[scissorStackSize - 1] = G_EX_ORIGIN_LEFT;
++            extended.scissorRightOriginStack[scissorStackSize - 1] = G_EX_ORIGIN_RIGHT;
++            state->updateDrawStatusAttribute(DrawAttribute::Scissor);
++            drawTexRect(wideUlx, uly, wideLrx, lry, tile, uls, ult, wideDsdx, dtdy, flip, extended.global.rect);
++            extended.scissorLeftOriginStack[scissorStackSize - 1] = savedLeft;
++            extended.scissorRightOriginStack[scissorStackSize - 1] = savedRight;
++            state->updateDrawStatusAttribute(DrawAttribute::Scissor);
++            return;
++        }
++
+         drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip, extended.global.rect);
+     }
+     
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
 index 82a3f5b..47f4d8a 100644
 --- a/src/hle/rt64_workload_queue.cpp
