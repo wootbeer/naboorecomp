@@ -430,21 +430,21 @@ text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_pr
 [[patches.hook]]
 func = "func_40008F40"
 before_vram = 0x400094C8
-text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, MEM_W(0x8, ctx->r22), MEM_W(0x10, ctx->r22)); }"
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object, gpr model); naboo_object_matrix(rdram, MEM_W(0x8, ctx->r22), MEM_W(0x10, ctx->r22), MEM_W(0x4, ctx->r22)); }"
 
 # func_4000A2E8: entry $s1 of the table at 0x40071B60 (+4 the matrix, in $a0; +0xC the object).
 [[patches.hook]]
 func = "func_4000A2E8"
 before_vram = 0x4000A444
-text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, MEM_W(0xC, (gpr)(int32_t)(0x40071B60 + ((uint32_t)ctx->r17 << 4)))); }"
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object, gpr model); naboo_object_matrix(rdram, ctx->r4, MEM_W(0xC, (gpr)(int32_t)(0x40071B60 + ((uint32_t)ctx->r17 << 4))), MEM_W(0x0, (gpr)(int32_t)(0x40071B60 + ((uint32_t)ctx->r17 << 4)))); }"
 
 # func_40012BC0, twice: one of two matrices of the scene's own ($a0).
 [[patches.hook]]
 func = "func_40012BC0"
 before_vram = 0x400135E0
-text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, 0x10); }"
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object, gpr model); naboo_object_matrix(rdram, ctx->r4, 0x10, 0x10); }"
 
 [[patches.hook]]
 func = "func_40012BC0"
 before_vram = 0x40014198
-text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, 0x20); }"
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object, gpr model); naboo_object_matrix(rdram, ctx->r4, 0x20, 0x20); }"

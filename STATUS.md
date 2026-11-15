@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 32)
+## Overview (as of round 33)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,33 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 33: the view's rotation from the frame; what's made afresh isn't followed
+
+The user on round 32's build: wipes good but a few pixels short at the
+left edge; explosions jitter; a building jittered at its foot; turning
+the camera opened seams between models that weren't there before
+(captures in `gfx_39402.zip`, not replayed yet).
+
+- **Seams in turns.** The camera object's up vector lacks some of the roll
+  the frame is drawn with (0.0014 off against the sky's matrix in a
+  capture), so objects standing still came out slightly differently placed
+  each frame, and in generated frames sat about a unit off the terrain
+  (drawn as made). The view's rotation now comes from the frame: the sky's
+  matrix (centered on the camera across the ground, square to the world)
+  is the view times a scale and a move, so its normalized rows are the
+  rotation; the eye stays the camera object's. `NABOO_PERF` counts "views
+  from the frame" (every frame in play here).
+- **Explosions.** The hooks now also give the display list each object is
+  drawn with (`naboo_object_matrix(matrix, object, model)`). A piece is
+  only matched to one of the same model, so what the game builds afresh
+  each frame (never at the same address twice running) is never followed.
+- The replay tool works again for in-play captures given the capture's
+  color image (`NABOO_REPLAY_FB=0x805B2800` for the user's): it was the
+  framebuffer, not the tool.
+
+Open: the wipes' left edge; the cinematic camera; sprites in generated
+frames; `gfx_39402.zip`.
 
 ## 2026-11-15, round 32: no blending outside play; pieces matched by place
 

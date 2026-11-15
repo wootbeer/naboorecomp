@@ -310,7 +310,7 @@ extern "C" void naboo_check_scissor_rect(uint8_t* rdram, recomp_context* ctx) {
 // world and the camera, which it needs to move objects and the camera between two of the
 // game's frames (lib-patches/rt64/0030).
 extern "C" void rt64_set_game_camera(uint32_t display_list, const float* projection, const float* view,
-    const uint32_t* matrices, const uint32_t* ids, uint32_t count);
+    const uint32_t* matrices, const uint32_t* ids, const uint32_t* models, uint32_t count);
 
 // The objects of the frame being made: each matrix the game puts in the display list (the four
 // places that write the 0105C03F matrix command, naboo.us.rev0.toml) with what it's the matrix
@@ -320,13 +320,17 @@ extern "C" void rt64_set_game_camera(uint32_t display_list, const float* project
 namespace {
     std::vector<uint32_t> frame_matrices;
     std::vector<uint32_t> frame_ids;
+    std::vector<uint32_t> frame_models;
 }
 
-extern "C" void naboo_object_matrix(uint8_t* rdram, gpr matrix, gpr object) {
+// `model` is the display list the object is drawn with: the same from frame to frame for a
+// model, somewhere new each frame for what the game makes afresh (an explosion's pieces).
+extern "C" void naboo_object_matrix(uint8_t* rdram, gpr matrix, gpr object, gpr model) {
     (void)rdram;
     if (frame_matrices.size() < 4096) {
         frame_matrices.push_back((uint32_t)matrix & 0x00FFFFFFu);
         frame_ids.push_back((uint32_t)object);
+        frame_models.push_back((uint32_t)model);
     }
 }
 
@@ -347,6 +351,7 @@ extern "C" void naboo_camera_for_task(uint8_t* rdram) {
         camera_snapshot_valid = false;
         frame_matrices.clear();
         frame_ids.clear();
+        frame_models.clear();
         return;
     }
 
@@ -380,10 +385,12 @@ extern "C" void naboo_camera_for_task(uint8_t* rdram) {
     if (!(length > 0.9f && length < 1.1f)) {
         frame_matrices.clear();
         frame_ids.clear();
+        frame_models.clear();
         return;
     }
 
-    rt64_set_game_camera((uint32_t)MEM_W(0x30, task), projection, view, frame_matrices.data(), frame_ids.data(), (uint32_t)frame_matrices.size());
+    rt64_set_game_camera((uint32_t)MEM_W(0x30, task), projection, view, frame_matrices.data(), frame_ids.data(), frame_models.data(), (uint32_t)frame_matrices.size());
     frame_matrices.clear();
     frame_ids.clear();
+    frame_models.clear();
 }

@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index ac4d898..7a8bf0b 100644
+index ac4d898..e3e1e14 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -8,12 +8,14 @@
@@ -21,7 +21,7 @@ index ac4d898..7a8bf0b 100644
              static std::atomic<int64_t> lastProgressMs{ 0 };
              static uint64_t rdpNs = 0, frameEndNs = 0;
              static int tasksToRAM = 0;
-+            static int matricesSeparated = 0, matricesCombined = 0, matricesNamed = 0;
++            static int matricesSeparated = 0, matricesCombined = 0, matricesNamed = 0, viewsFromFrame = 0;
              static uint32_t lastColorWidth = 0;
  
              static int64_t nowMs() {
@@ -31,11 +31,11 @@ index ac4d898..7a8bf0b 100644
                  if (now - last >= std::chrono::seconds(2)) {
 -                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
 -                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
-+                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide; matrices: %d taken apart (%d named objects), %d kept combined), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
-+                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, matricesSeparated, matricesNamed, matricesCombined, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
++                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide; matrices: %d taken apart (%d named objects), %d kept combined, %d views from the frame), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
++                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, matricesSeparated, matricesNamed, matricesCombined, viewsFromFrame, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
                          rdp.total / tasks, rdp.worst, frameEnd.total / tasks, frameEnd.worst);
                      tasksToRAM = 0;
-+                    matricesSeparated = matricesCombined = matricesNamed = 0;
++                    matricesSeparated = matricesCombined = matricesNamed = viewsFromFrame = 0;
                      fflush(stderr);
                      task = microcode = rdp = frameEnd = Stat();
                      tasks = 0;
@@ -49,7 +49,7 @@ index ac4d898..7a8bf0b 100644
  
          // The RDP commands the microcode keeps in DMEM until it sends them.
          constexpr uint32_t RDPStagingAddress = 0xE80;
-@@ -339,9 +346,164 @@ namespace RT64 {
+@@ -339,9 +346,169 @@ namespace RT64 {
              return !useRDPTriangles;
          }
  
@@ -71,21 +71,26 @@ index ac4d898..7a8bf0b 100644
 +
 +            // The frame's object matrices (RDRAM addresses) and whose each is.
 +            std::vector<std::pair<uint32_t, uint32_t>> objects;
++
++            // The display list each is drawn with.
++            std::vector<uint32_t> models;
 +        };
 +
 +        static std::mutex gameCameraMutex;
 +        static GameCamera gameCameras[8];
 +        static uint32_t gameCameraCursor = 0;
 +
-+        static void setGameCamera(uint32_t displayList, const float *m, const float *v, const uint32_t *matrices, const uint32_t *ids, uint32_t count) {
++        static void setGameCamera(uint32_t displayList, const float *m, const float *v, const uint32_t *matrices, const uint32_t *ids, const uint32_t *models, uint32_t count) {
 +            std::lock_guard<std::mutex> lock(gameCameraMutex);
 +            GameCamera &camera = gameCameras[gameCameraCursor];
 +            gameCameraCursor = (gameCameraCursor + 1) % std::size(gameCameras);
 +            camera.displayList = displayList & 0x00FFFFFF;
 +            camera.valid = true;
 +            camera.objects.clear();
++            camera.models.clear();
 +            for (uint32_t i = 0; i < count; i++) {
 +                camera.objects.emplace_back(matrices[i], ids[i]);
++                camera.models.push_back(models[i]);
 +            }
 +
 +            // The game keeps its perspective matrix the other way round from the combined
@@ -217,7 +222,7 @@ index ac4d898..7a8bf0b 100644
          static void disableInterpolation(State *state) {
              RSP *rsp = state->rsp.get();
              for (bool proj : { false, true }) {
-@@ -362,14 +524,14 @@ namespace RT64 {
+@@ -362,14 +529,14 @@ namespace RT64 {
          // region an anchored rectangle was drawn in, this frame or the last, is moved across by as
          // much as the rectangle was, in clip space (x += shift * w). A world model passing behind
          // the radar would be moved with it while it's there.
@@ -235,7 +240,7 @@ index ac4d898..7a8bf0b 100644
              }
  
              // Where the model's origin is, in the framebuffer the rectangles are given in: the
-@@ -382,22 +544,126 @@ namespace RT64 {
+@@ -382,22 +549,126 @@ namespace RT64 {
              const float rectX = halfWidth + (viewportX - halfWidth) * scale;
              const uint16_t origin = RDP::autoAnchorAt(state, int32_t(rectX * 4.0f), int32_t(viewportY * 4.0f));
              if (origin == G_EX_ORIGIN_NONE) {
@@ -280,7 +285,7 @@ index ac4d898..7a8bf0b 100644
 +                for (uint32_t c = 0; c < 4; c++) {
 +                    combined[r][c] = hookMatrix[r][c];
 +                }
-+            }
+             }
 +
 +            const uint32_t candidates = std::min(listProjectionCount, 1U);
 +            for (uint32_t p = 0; p < candidates; p++) {
@@ -351,7 +356,7 @@ index ac4d898..7a8bf0b 100644
 +
 +                rsp->matrixCommon(cleaned, 0, uint8_t(rsp->loadMask));
 +                return true;
-             }
++            }
 +
 +            return false;
          }
@@ -367,7 +372,7 @@ index ac4d898..7a8bf0b 100644
              memcpy(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData));
              for (uint32_t r = 0; r < 4; r++) {
                  for (uint32_t c = 0; c < 4; c++) {
-@@ -406,9 +672,31 @@ namespace RT64 {
+@@ -406,9 +677,31 @@ namespace RT64 {
                  }
              }
  
@@ -400,7 +405,7 @@ index ac4d898..7a8bf0b 100644
              hookMatrixLoaded = true;
          }
  
-@@ -593,6 +881,13 @@ namespace RT64 {
+@@ -593,6 +886,13 @@ namespace RT64 {
                  return false;
              case HookTriangleDraw:
                  return hookTriangleDraw(rsp, state);
@@ -414,7 +419,7 @@ index ac4d898..7a8bf0b 100644
              default:
                  return false;
              }
-@@ -612,6 +907,9 @@ namespace RT64 {
+@@ -612,6 +912,9 @@ namespace RT64 {
                      rspInterpreter->setHook(HookTriangleDraw, true);
                      rspInterpreter->setHook(HookTransformFirst, true);
                      rspInterpreter->setHook(HookTransformNext, true);
@@ -424,7 +429,7 @@ index ac4d898..7a8bf0b 100644
                  }
              }
  
-@@ -619,6 +917,8 @@ namespace RT64 {
+@@ -619,6 +922,8 @@ namespace RT64 {
              rsp->rdpUserData = state;
              rsp->hookUserData = state;
              hookGeneration++;
@@ -433,7 +438,7 @@ index ac4d898..7a8bf0b 100644
              hookMatrixLoaded = false;
              hookViewportLoaded = false;
              pendingValid = false;
-@@ -682,6 +982,127 @@ namespace RT64 {
+@@ -682,6 +987,220 @@ namespace RT64 {
              if (useInterpreter()) {
                  if (useTriangleHooks()) {
                      disableInterpolation(state);
@@ -445,8 +450,92 @@ index ac4d898..7a8bf0b 100644
 +                        if (camera.valid && (camera.displayList == (state->displayListAddress & 0x00FFFFFF))) {
 +                            listProjections[0] = camera.projection;
 +                            listInverseProjections[0] = hlslpp::inverse(camera.projection);
-+listViewProjection = hlslpp::mul(camera.view, camera.projection);
-+                            listInverseView = hlslpp::inverse(camera.view);
++                            // The view's rotation, from the frame itself. The game's camera object
++                            // gives it without quite the roll the frame was drawn with (it's off by
++                            // a thousandth or so in a banked turn), and objects that stand still
++                            // then come out a little differently placed each frame: in the frames
++                            // between, a unit or so off the terrain (which is drawn as made), seams
++                            // opening along buildings' feet. The sky's matrix is the view times a
++                            // scale and a move, so its rows, normalized, are the view's rotation exactly.
++                            hlslpp::float4x4 view = camera.view;
++                            for (const auto &object : camera.objects) {
++                                if (object.first + 0x40 > 0x800000) {
++                                    continue;
++                                }
++
++                                hlslpp::float4x4 combined;
++                                for (uint32_t r = 0; r < 4; r++) {
++                                    for (uint32_t c = 0; c < 4; c++) {
++                                        const uint32_t offset = (r * 4 + c) * 2;
++                                        const int32_t value = int32_t((uint32_t(uint16_t(rdramHalf(state, object.first + offset))) << 16) | uint16_t(rdramHalf(state, object.first + 0x20 + offset)));
++                                        combined[r][c] = float(value) / 65536.0f;
++                                    }
++                                }
++
++                                const hlslpp::float4x4 modelView = hlslpp::mul(combined, listInverseProjections[0]);
++                                float rows[3][3];
++                                bool valid = (std::fabs(float(modelView[3][3]) - 1.0f) < 2e-3f);
++
++                                // The sky's: centered on the camera across the ground, and standing
++                                // square to the world as near as the camera object can tell.
++                                const hlslpp::float4x4 cameraInverse = hlslpp::inverse(camera.view);
++                                const hlslpp::float4x4 roughWorld = hlslpp::mul(modelView, cameraInverse);
++                                valid = valid && (std::fabs(float(roughWorld[3][0]) - float(cameraInverse[3][0])) < 0.25f) &&
++                                    (std::fabs(float(roughWorld[3][2]) - float(cameraInverse[3][2])) < 0.25f);
++                                for (uint32_t r = 0; valid && (r < 3); r++) {
++                                    float length = 0.0f;
++                                    for (uint32_t c = 0; c < 3; c++) {
++                                        length += float(roughWorld[r][c]) * float(roughWorld[r][c]);
++                                    }
++
++                                    valid = (length > 1e-6f) && (std::fabs(float(roughWorld[r][r])) > 0.9999f * std::sqrt(length));
++                                }
++
++                                for (uint32_t r = 0; r < 3; r++) {
++                                    float length = 0.0f;
++                                    for (uint32_t c = 0; c < 3; c++) {
++                                        rows[r][c] = float(modelView[r][c]);
++                                        length += rows[r][c] * rows[r][c];
++                                    }
++
++                                    length = std::sqrt(length);
++                                    valid = valid && (length > 1e-3f);
++                                    float agreement = 0.0f;
++                                    for (uint32_t c = 0; c < 3; c++) {
++                                        rows[r][c] = valid ? (rows[r][c] / length) : 0.0f;
++                                        agreement += rows[r][c] * float(camera.view[r][c]);
++                                    }
++
++                                    // It has to be the camera object's rotation, near enough.
++                                    valid = valid && (agreement > 0.999f);
++                                }
++
++                                for (uint32_t i = 0; valid && (i < 3); i++) {
++                                    const uint32_t j = (i + 1) % 3;
++                                    const float dot = rows[i][0] * rows[j][0] + rows[i][1] * rows[j][1] + rows[i][2] * rows[j][2];
++                                    valid = (std::fabs(dot) < 2e-3f);
++                                }
++
++                                if (valid) {
++                                    const hlslpp::float4x4 inverse = hlslpp::inverse(camera.view);
++                                    const float eye[3] = { float(inverse[3][0]), float(inverse[3][1]), float(inverse[3][2]) };
++                                    for (uint32_t r = 0; r < 3; r++) {
++                                        for (uint32_t c = 0; c < 3; c++) {
++                                            view[r][c] = rows[r][c];
++                                        }
++                                    }
++
++                                    for (uint32_t c = 0; c < 3; c++) {
++                                        view[3][c] = -(eye[0] * rows[0][c] + eye[1] * rows[1][c] + eye[2] * rows[2][c]);
++                                    }
++
++                                    Perf::viewsFromFrame++;
++                                    break;
++                                }
++                            }
++
++                            listViewProjection = hlslpp::mul(view, camera.projection);
++                            listInverseView = hlslpp::inverse(view);
 +                            listProjectionCount = 1;
 +                            // A camera that isn't where the last frame's could have got to (a cut to
 +                            // another view): nothing is moved across it, the camera and the objects
@@ -481,6 +570,7 @@ index ac4d898..7a8bf0b 100644
 +                            struct Piece {
 +                                float position[3];
 +                                uint32_t number;
++                                uint32_t model;
 +                                bool taken;
 +                            };
 +
@@ -488,7 +578,8 @@ index ac4d898..7a8bf0b 100644
 +                            static uint32_t nextPieceNumber = 0;
 +                            std::unordered_map<uint32_t, std::vector<Piece>> pieces;
 +                            const hlslpp::float4x4 toWorld = hlslpp::mul(listInverseProjections[0], listInverseView);
-+                            for (const auto &object : camera.objects) {
++                            for (size_t o = 0; o < camera.objects.size(); o++) {
++                                const auto &object = camera.objects[o];
 +                                if (object.first + 0x40 > 0x800000) {
 +                                    continue;
 +                                }
@@ -505,6 +596,7 @@ index ac4d898..7a8bf0b 100644
 +                                const hlslpp::float4x4 world = hlslpp::mul(combined, toWorld);
 +                                const float w = float(world[3][3]);
 +                                Piece piece = {};
++                                piece.model = camera.models[o];
 +                                for (uint32_t c = 0; c < 3; c++) {
 +                                    piece.position[c] = (std::fabs(w) > 1e-6f) ? (float(world[3][c]) / w) : 0.0f;
 +                                }
@@ -516,7 +608,10 @@ index ac4d898..7a8bf0b 100644
 +                                const auto before = previousPieces.find(object.second);
 +                                if (before != previousPieces.end()) {
 +                                    for (Piece &candidate : before->second) {
-+                                        if (candidate.taken) {
++                                        // Only the same model: what the game makes afresh each frame
++                                        // (an explosion's pieces, never at the same address twice
++                                        // running) is never followed, and is drawn as made.
++                                        if (candidate.taken || (candidate.model != piece.model)) {
 +                                            continue;
 +                                        }
 +
@@ -541,6 +636,9 @@ index ac4d898..7a8bf0b 100644
 +                                }
 +
 +                                pieces[object.second].push_back(piece);
++                                if (match == nullptr) {
++                                    continue;
++                                }
 +
 +                                // As copyToDMEM leaves the matrix in DMEM.
 +                                uint8_t data[0x40];
@@ -561,7 +659,7 @@ index ac4d898..7a8bf0b 100644
                  }
  
                  // In play nothing reads the framebuffer back from RAM (effects that sample it go
-@@ -1564,3 +1985,12 @@ namespace RT64 {
+@@ -1564,3 +2083,12 @@ namespace RT64 {
          }
      }
  };
@@ -570,9 +668,9 @@ index ac4d898..7a8bf0b 100644
 +// perspective matrix (16 floats, as the game keeps it) and its view matrix (16 floats, rows first,
 +// for row vectors: world to camera).
 +extern "C" void rt64_set_game_camera(uint32_t displayList, const float *projection, const float *view,
-+    const uint32_t *matrices, const uint32_t *ids, uint32_t count)
++    const uint32_t *matrices, const uint32_t *ids, const uint32_t *models, uint32_t count)
 +{
-+    RT64::GBI_F3DNABOO::setGameCamera(displayList, projection, view, matrices, ids, count);
++    RT64::GBI_F3DNABOO::setGameCamera(displayList, projection, view, matrices, ids, models, count);
 +}
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
 index 15f172e..65b0b20 100644
