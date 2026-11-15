@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 35)
+## Overview (as of round 36)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,43 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 36: the new path (F10): the view's place from the frame, steady names, pairing counted
+
+Behind F10 / `NABOO_SMOOTH=1` only; the default is unchanged.
+
+- **The camera object's eye isn't the frame's either.** In a steady turn
+  the terrain's fixed origin slid about a unit a frame against it
+  (`NABOO_PERF` now prints "the camera object's off by N a frame": 1.0
+  here). The module keeps its own eye: moved each frame by as much as the
+  camera object's, then corrected by the median of how far the named
+  objects carried over from the last frame have gone (most stand still).
+  With the rotation from the sky (round 33) the whole view is now from
+  the frame. The sky is recognised by its own rotation, not that eye.
+- **Names are steady**: a named object is followed from its second frame,
+  always. The continuity test (`followObject`, not called any more) made
+  objects paired one frame and not the next. Pieces under one pointer are
+  still matched by place and model (to be replaced by the scene graph's
+  nodes).
+- **Terrain** stays unpaired: in the world as made, under the moving view
+  (which is now right for it).
+- **Counted** (`[NABOO PERF] pairing:`): named, paired with the frame
+  before, flips, unnamed, and after the eye's correction how many carried
+  objects stand still (within 0.05) or move. Here in a turn: ~99% of
+  named paired, 0 flips; 15-20% unnamed; but only about half the carried
+  objects count as still. Not yet explained: the player's craft and bolts
+  are some of the moving ones; the rest may be a rotation error at
+  distance. That is the next thing to look at, as it's what would show as
+  buildings shifting.
+
+Tried first and dropped: camera-space modelviews under the bare
+projection (as the Rogue Squadron recomp does). It needs the terrain and
+sky paired in camera space too; the terrain's grid origin there moves
+with every frame, and the world-space form with an exact view does the
+same job with the terrain left alone.
+
+Checked on the new path: 144 frames firing, clean; sky even in a turn;
+HUD steady. Not checked: buildings, ship groups, other levels.
 
 ## 2026-11-15, round 35: how a Rogue Squadron recomp does it (ideas for the next attempt)
 
