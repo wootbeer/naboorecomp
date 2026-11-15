@@ -1,0 +1,56 @@
+diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
+index 8987fe1..bccc061 100644
+--- a/src/hle/rt64_rdp.cpp
++++ b/src/hle/rt64_rdp.cpp
+@@ -292,6 +292,10 @@ namespace RT64 {
+ #       ifdef LOG_COLOR_DEPTH_IMAGE_METHODS
+             RT64_LOG_PRINTF("RDP::setColorImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
+ #       endif
++
++            // The scissor may have been set for this image before it.
++            includeLastColumnInScissor();
++            state->updateDrawStatusAttribute(DrawAttribute::Scissor);
+         }
+     }
+ 
+@@ -1004,12 +1008,28 @@ namespace RT64 {
+         scissorRect.uly = std::clamp(uly + extAlignment.topOffset, extAlignment.topBound, extAlignment.bottomBound);
+         scissorRect.lrx = std::clamp(movedFromOrigin(lrx + extAlignment.rightOffset, extAlignment.rightOrigin), extAlignment.leftBound, extAlignment.rightBound);
+         scissorRect.lry = std::clamp(lry + extAlignment.bottomOffset, extAlignment.topBound, extAlignment.bottomBound);
++        includeLastColumnInScissor();
+         scissorModeStack[scissorStackSize - 1] = mode;
+         extended.scissorLeftOriginStack[scissorStackSize - 1] = extAlignment.leftOrigin;
+         extended.scissorRightOriginStack[scissorStackSize - 1] = extAlignment.rightOrigin;
+         state->updateDrawStatusAttribute(DrawAttribute::Scissor);
+     }
+ 
++    // A scissor that ends one column short of the color image's width is taken to its end.
++    // Battle for Naboo's always does (399 of 400, 639 of 640), so nothing it draws or clears
++    // reaches a framebuffer's last column, and what an earlier screen left there stays, in the
++    // render target and (written back) in RAM: on a TV the column is in the overscan, or lost in
++    // the blur. On the 640-wide "A long time ago..." screen the picture starts 19 pixels into
++    // the row, so that column is inside it: a line of stray pixels near the right side (white
++    // ones left by the white logo screens, never cleared by the fades to black). With the
++    // column inside the scissor, the game's own clears and fills cover it like the rest.
++    void RDP::includeLastColumnInScissor() {
++        FixedRect &scissorRect = scissorRectStack[scissorStackSize - 1];
++        if ((colorImage.width > 1) && (scissorRect.lrx == (int32_t(colorImage.width) - 1) * 4)) {
++            scissorRect.lrx += 4;
++        }
++    }
++
+     void RDP::pushScissor() {
+         if (scissorStackSize < RDP_EXTENDED_STACK_SIZE) {
+             scissorRectStack[scissorStackSize] = scissorRectStack[scissorStackSize - 1];
+diff --git a/src/hle/rt64_rdp.h b/src/hle/rt64_rdp.h
+index 84f639f..26d673f 100644
+--- a/src/hle/rt64_rdp.h
++++ b/src/hle/rt64_rdp.h
+@@ -150,6 +150,7 @@ namespace RT64 {
+         int32_t movedFromOrigin(int32_t x, uint16_t ori);
+         uint32_t maskAddress(uint32_t address);
+         void setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address);
++        void includeLastColumnInScissor();
+         void setDepthImage(uint32_t address);
+         void setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address);
+         void setCombine(uint64_t combine);

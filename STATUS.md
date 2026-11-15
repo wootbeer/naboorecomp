@@ -213,6 +213,36 @@ particles (`05000088`) pick their render mode by the flag at DMEM 0x11C
 display list flips per object, so an opaque draw of a spark texture would
 be exactly a black square. Not pinned down yet.
 
+**The stray pixels on "A long time ago..."** (open since round 22). It's a
+640x384 screen drawn into two framebuffers in turn (`0x806EF000`,
+`0x80767000`), the column on one of them, at x = 621 of the picture. What it
+is: the game's scissor always ends a column short of the framebuffer (399
+of 400, 639 of 640), so nothing it draws or clears ever reaches a
+framebuffer's last column, and whatever was there stays, in RT64's render
+target and, written back after each frame, in RAM (the capture's RAM had 68
+non-black pixels in column 639: white ones from the white logo screens that
+used the same buffer, never cleared by their fades to black, and older
+memory). On a TV that column is in the overscan or lost in the blur. Here
+the picture of this screen starts 19 pixels into the row (the VI origin, to
+centre it), so column 639 lands at x = 620, inside the picture, on the frames
+that show that buffer. Round 22's crop of the last column (for the dark line
+at the right in play) is at the picture's edge and can't reach it.
+
+Fix (`lib-patches/rt64/0028`): a scissor that ends exactly one column short
+of the color image's width is taken to its end (`RDP::setScissor`, and
+`setColorImage` for a scissor set before it), so the game's own fills and
+clears cover the last column like the rest. 87 frames of the screen, none
+with the column (45 before); menus, craft select and play look as before.
+
+Tried first and dropped: copying the neighbouring column over the last one
+where RT64 reads a framebuffer from RAM (cleared the pixels that came from
+RAM, not the ones already in the render target, which go back to RAM with
+every frame), the same in RAM when the color image is set (too late: RAM is
+checked for changes at the start of the list), and that plus a check before
+the RAM comparison (the screen went black). Captures of this screen need
+F12 within about 1.5 s of the fourth Start press from the title with no
+save; the replay tool showed the RAM half of it at once.
+
 **The user's run of this build** (naboo_test4.txt, an RX 5700 XT): no heap
 error in about 135,000 checks, no freeze or crash; every wait between tasks
 under 0.4 s; in play (211 two-second lines) no task rendered to RAM, the
@@ -229,11 +259,8 @@ which is now most of a frame's cost. "It did seem to run better overall."
   probably one of the two ways a triangle gets drawn (the 3D hook, or the
   microcode's own RDP triangle when the vertices aren't the hooked ones)
   loses the blend, or a texture load lands late. Not reproduced here yet.
-- The stray column on "A long time ago...": reproduced here. It's a
-  400-wide screen (not 640 as round 22 had it), the column is at x = 388 of
-  400 (3 window pixels wide at 1280), single pixels of assorted colours down
-  most of the height, on alternate frames. Not its text rectangles (they
-  span x = 120 to 282); the frame also draws about 1100 triangles.
+- Snowflakes (a snow level's weather effect) stop about an inch short of
+  each side on a widescreen window (user): the effect covers the 4:3 view.
 - Mines swapping places and flickering spherical explosions (the user's
   second clip): not looked at yet.
 - Distant objects (buildings, trees) appearing in the middle of the screen.
