@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index ac4d898..23083f0 100644
+index ac4d898..7a8bf0b 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -8,12 +8,14 @@
@@ -280,7 +280,7 @@ index ac4d898..23083f0 100644
 +                for (uint32_t c = 0; c < 4; c++) {
 +                    combined[r][c] = hookMatrix[r][c];
 +                }
-             }
++            }
 +
 +            const uint32_t candidates = std::min(listProjectionCount, 1U);
 +            for (uint32_t p = 0; p < candidates; p++) {
@@ -351,7 +351,7 @@ index ac4d898..23083f0 100644
 +
 +                rsp->matrixCommon(cleaned, 0, uint8_t(rsp->loadMask));
 +                return true;
-+            }
+             }
 +
 +            return false;
          }
@@ -433,7 +433,7 @@ index ac4d898..23083f0 100644
              hookMatrixLoaded = false;
              hookViewportLoaded = false;
              pendingValid = false;
-@@ -682,6 +982,81 @@ namespace RT64 {
+@@ -682,6 +982,127 @@ namespace RT64 {
              if (useInterpreter()) {
                  if (useTriangleHooks()) {
                      disableInterpolation(state);
@@ -471,41 +471,87 @@ index ac4d898..23083f0 100644
 +                            previousInverseView = listInverseView;
 +                            listObjectIds.clear();
 +
-+                            // One pointer can stand for many things drawn (an effect's pieces: bolts,
-+                            // embers), told apart only by their order, which changes as pieces come
-+                            // and go: a new bolt took the place in the order of an ember on the
-+                            // ground and was drawn stretched between the two. So when the number of
-+                            // matrices under a pointer isn't what it was the frame before, none of
-+                            // them is followed this frame.
-+                            static std::unordered_map<uint32_t, uint32_t> previousCounts;
-+                            std::unordered_map<uint32_t, uint32_t> counts;
-+                            for (const auto &object : camera.objects) {
-+                                counts[object.second]++;
-+                            }
++                            // One pointer can stand for many things drawn (the ships of a group, an
++                            // effect's bolts and embers), in an order that changes from frame to
++                            // frame (they're drawn by distance; pieces come and go). Told apart by
++                            // that order, ships took each other's places and came apart in the
++                            // frames between. Each piece is the one that was nearest to it under
++                            // the same pointer the frame before, within reach, and takes its number;
++                            // a piece with none near is new.
++                            struct Piece {
++                                float position[3];
++                                uint32_t number;
++                                bool taken;
++                            };
 +
-+                            std::unordered_map<uint32_t, uint32_t> seen;
++                            static std::unordered_map<uint32_t, std::vector<Piece>> previousPieces;
++                            static uint32_t nextPieceNumber = 0;
++                            std::unordered_map<uint32_t, std::vector<Piece>> pieces;
++                            const hlslpp::float4x4 toWorld = hlslpp::mul(listInverseProjections[0], listInverseView);
 +                            for (const auto &object : camera.objects) {
 +                                if (object.first + 0x40 > 0x800000) {
 +                                    continue;
 +                                }
 +
-+                                const auto previous = previousCounts.find(object.second);
-+                                const uint32_t count = counts[object.second];
-+                                if ((count > 1) && ((previous == previousCounts.end()) || (previous->second != count))) {
-+                                    continue;
++                                hlslpp::float4x4 combined;
++                                for (uint32_t r = 0; r < 4; r++) {
++                                    for (uint32_t c = 0; c < 4; c++) {
++                                        const uint32_t offset = (r * 4 + c) * 2;
++                                        const int32_t value = int32_t((uint32_t(uint16_t(rdramHalf(state, object.first + offset))) << 16) | uint16_t(rdramHalf(state, object.first + 0x20 + offset)));
++                                        combined[r][c] = float(value) / 65536.0f;
++                                    }
 +                                }
++
++                                const hlslpp::float4x4 world = hlslpp::mul(combined, toWorld);
++                                const float w = float(world[3][3]);
++                                Piece piece = {};
++                                for (uint32_t c = 0; c < 3; c++) {
++                                    piece.position[c] = (std::fabs(w) > 1e-6f) ? (float(world[3][c]) / w) : 0.0f;
++                                }
++
++                                // The nearest piece of the frame before that no other has taken.
++                                const float reach = 120.0f;
++                                float nearest = reach * reach;
++                                Piece *match = nullptr;
++                                const auto before = previousPieces.find(object.second);
++                                if (before != previousPieces.end()) {
++                                    for (Piece &candidate : before->second) {
++                                        if (candidate.taken) {
++                                            continue;
++                                        }
++
++                                        float distance = 0.0f;
++                                        for (uint32_t c = 0; c < 3; c++) {
++                                            distance += (candidate.position[c] - piece.position[c]) * (candidate.position[c] - piece.position[c]);
++                                        }
++
++                                        if (distance < nearest) {
++                                            nearest = distance;
++                                            match = &candidate;
++                                        }
++                                    }
++                                }
++
++                                if (match != nullptr) {
++                                    match->taken = true;
++                                    piece.number = match->number;
++                                }
++                                else {
++                                    piece.number = nextPieceNumber++;
++                                }
++
++                                pieces[object.second].push_back(piece);
 +
 +                                // As copyToDMEM leaves the matrix in DMEM.
 +                                uint8_t data[0x40];
 +                                const uint8_t *rdram = state->fromRDRAM(0);
 +                                memcpy(data, &rdram[object.first], sizeof(data));
-+                                const uint32_t part = seen[object.second]++;
-+                                uint32_t id = (object.second * 2654435761U) ^ (part * 40503U) ^ (cameraEpoch * 0x9E3779B1U);
++                                uint32_t id = (object.second * 2654435761U) ^ (piece.number * 40503U) ^ (cameraEpoch * 0x9E3779B1U);
 +                                id = (id % 0xFFFFFF00U) + 1;
 +                                listObjectIds.emplace(std::string(reinterpret_cast<const char *>(data), sizeof(data)), id);
 +                            }
 +
-+                            previousCounts = std::move(counts);
++                            previousPieces = std::move(pieces);
 +                            objectList++;
 +                            if (objectPlaces.size() > 8192) {
 +                                objectPlaces.clear();
@@ -515,7 +561,7 @@ index ac4d898..23083f0 100644
                  }
  
                  // In play nothing reads the framebuffer back from RAM (effects that sample it go
-@@ -1564,3 +1939,12 @@ namespace RT64 {
+@@ -1564,3 +1985,12 @@ namespace RT64 {
          }
      }
  };

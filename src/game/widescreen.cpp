@@ -94,6 +94,7 @@ extern "C" { uint32_t naboo_menu_loop_ticks = 0; }
 namespace {
     float camera_snapshot[9];
     bool camera_snapshot_valid = false;
+    bool camera_snapshot_in_play = false;
 }
 
 static void naboo_camera_snapshot(uint8_t* rdram) {
@@ -130,6 +131,12 @@ extern "C" void naboo_widen_projection(uint8_t* rdram, recomp_context* ctx) {
     const bool camera_in_mission = (MEM_W(0, (gpr)(int32_t)0x4004C67C) != 0);
     rt64_auto_anchor_fb_width = ((MEM_W(0, (gpr)(int32_t)0x4005C84C) == 0) && !in_menu && camera_in_mission) ? 400 : 0;
     rt64_auto_anchor_serial++;
+
+    // The camera goes to RT64 (naboo_camera_for_task) only in a mission's play: there the camera
+    // object is the view the frame is drawn with (checked on captures). Cutscenes, the logo
+    // scenes and the menus' 3D screens have cameras of their own, and taken apart with this one
+    // their frames in between came apart.
+    camera_snapshot_in_play = (rt64_auto_anchor_fb_width != 0);
     const float scale = widescreen_scale();
     if (cutscene || (scale == 1.0f)) {
         return;
@@ -336,7 +343,8 @@ extern "C" void naboo_camera_for_task(uint8_t* rdram) {
     }
 
     // No projection built since the last task: no camera for this one (a frame without the 3D scene).
-    if (!camera_snapshot_valid) {
+    if (!camera_snapshot_valid || !camera_snapshot_in_play) {
+        camera_snapshot_valid = false;
         frame_matrices.clear();
         frame_ids.clear();
         return;

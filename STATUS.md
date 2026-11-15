@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 31)
+## Overview (as of round 32)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,29 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 32: no blending outside play; pieces matched by place
+
+The user on round 31's build: the HUD is right again; still "bad jitter
+in the intro / logo movies", "when first starting a level", "flashing on
+flying ships", "actual parts of things coming apart".
+
+- **Cutscenes, logo scenes, menus.** The camera object at `0x40060DBC`
+  was only checked against captures taken in play. Those other scenes have
+  cameras of their own, so their frames were taken apart with the wrong
+  view. `naboo_camera_for_task` now gives RT64 a camera only in a
+  mission's play (the same test as the HUD's anchoring); elsewhere every
+  matrix stays combined and nothing is moved between frames, as before
+  round 28. To do: find the cinematic camera.
+- **Pieces under one pointer** (the ships of a group, an effect's pieces)
+  were numbered by the order they're drawn in, which changes (drawn by
+  distance). Each piece now takes the number of the piece that was nearest
+  to it under the same pointer the frame before (within 120 units), or a
+  new one (`previousPieces`, in `beginDisplayList`). The rule that dropped
+  a pointer's pieces when their count changed is gone.
+
+Checked: 144 frames in play while firing, clean; the level's opening
+cutscene shows the game's frames only. Not checked: groups of ships.
 
 ## 2026-11-15, round 31: what jittered: the radar, the sky, and a freeze
 
