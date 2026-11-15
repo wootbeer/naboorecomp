@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 36)
+## Overview (as of round 37)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,34 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-15, round 37: the abort wipe across the wide picture; the menu after a quit; edge culling
+
+The user on round 34's default: "so much better already" (F10 mode not
+good, as expected). Still: the wipe after quitting a mission stops short
+of the left edge; objects culled at the very edges; after quitting, the
+menus were slow until craft select.
+
+- **The wipe after aborting a level** (reproduced: `/tmp/nw/quit4.sh`:
+  pause, S to Abort Level, Space, A to Yes, Space) is one black texture
+  rectangle without depth, the picture's full height, from a moving left
+  edge to the framebuffer's right side. `RDP::drawTexRect` took it for
+  the HUD (center in the right third) and pinned it to the right side at
+  its 4:3 width: a strip stayed uncovered on the left, and the radar showed
+  over it. Now a depth-less rectangle over the whole height that reaches
+  either side (`screenEffectRect`) is stretched across the wide picture
+  from its center, like the sprites (`drawStretchedTexRect`, shared with
+  them). Checked: the wipe sweeps edge to edge and ends all black.
+- **The menu after a quit**: not reproduced as a change. Here the Game
+  Over, Elite Officers and title screens after a quit draw into a 512-wide
+  framebuffer at 30-45 frames a second (lavapipe), with 14-16 ms in the
+  render to RAM, about as the 512-wide menus before a mission. No textures
+  come from framebuffers there (new `NABOO_PERF` line). The title at boot
+  is 640 wide and cheaper. Needs the user's `NABOO_PERF` log.
+- **Edge culling**: object centers (all object matrices in play, a minute
+  of flying) are drawn out to the wide edges and past them, falling off
+  smoothly, with no step at the 4:3 edge (0.75): not a 4:3 object test.
+  Needs a capture (F12) with the object missing.
 
 ## 2026-11-15, round 36: the new path (F10): the view's place from the frame, steady names, pairing counted
 
