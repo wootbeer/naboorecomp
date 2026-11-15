@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <vector>
 
 #include "recomp.h"
 
@@ -272,20 +273,80 @@ extern "C" void naboo_check_scissor_rect(uint8_t* rdram, recomp_context* ctx) {
         ctx->r5 = (gpr)(int32_t)0x4004CD28;
     }
 }
-// The camera's perspective matrix (16 floats at 0x4007D9B0), as func_4001A078 finishes it, goes
-// to RT64: with it each object's combined matrix comes apart into a projection and a modelview,
-// which RT64 needs to move objects and the camera between two of the game's frames
-// (lib-patches/rt64/0030).
-extern "C" void rt64_set_game_projection(const float* matrix);
+// The camera of the frame whose graphics task is starting (func_40023558, naboo.us.rev0.toml)
+// goes to RT64 with the task's display list: the perspective matrix (16 floats at 0x4007D9B0)
+// and a view matrix made from the camera object (0x40060DBC: the eye, then the forward and up
+// vectors). With them RT64 takes each object's combined matrix apart into its place in the
+// world and the camera, which it needs to move objects and the camera between two of the
+// game's frames (lib-patches/rt64/0030).
+extern "C" void rt64_set_game_camera(uint32_t display_list, const float* projection, const float* view,
+    const uint32_t* matrices, const uint32_t* ids, uint32_t count);
 
-extern "C" void naboo_projection_built(uint8_t* rdram, gpr matrix) {
-    if ((uint32_t)matrix != 0x4007D9B0) {
+// The objects of the frame being made: each matrix the game puts in the display list (the four
+// places that write the 0105C03F matrix command, naboo.us.rev0.toml) with what it's the matrix
+// of -- the object's pointer, the same from frame to frame. RT64 follows an object between
+// frames by it, rather than pairing it with whatever was nearest in the frame before (a new
+// laser bolt slid in from another's place, flashes stretched into squares, mines changed places).
+namespace {
+    std::vector<uint32_t> frame_matrices;
+    std::vector<uint32_t> frame_ids;
+}
+
+extern "C" void naboo_object_matrix(uint8_t* rdram, gpr matrix, gpr object) {
+    (void)rdram;
+    if (frame_matrices.size() < 4096) {
+        frame_matrices.push_back((uint32_t)matrix & 0x00FFFFFFu);
+        frame_ids.push_back((uint32_t)object);
+    }
+}
+
+extern "C" void naboo_camera_for_task(uint8_t* rdram) {
+    constexpr gpr kCurrentTask = (gpr)(int32_t)0x40080120;
+    const gpr task = (gpr)(int32_t)MEM_W(0, kCurrentTask);
+    if (MEM_W(0, task) != 1) { // M_GFXTASK
         return;
     }
 
-    float values[16];
+    float projection[16];
     for (int i = 0; i < 16; i++) {
-        values[i] = to_float((uint32_t)MEM_W(i * 4, matrix));
+        projection[i] = to_float((uint32_t)MEM_W(i * 4, (gpr)(int32_t)0x4007D9B0));
     }
-    rt64_set_game_projection(values);
+
+    float camera[9];
+    for (int i = 0; i < 9; i++) {
+        camera[i] = to_float((uint32_t)MEM_W(i * 4, (gpr)(int32_t)0x40060DBC));
+    }
+
+    const float* eye = &camera[0];
+    const float* forward = &camera[3];
+    const float* up = &camera[6];
+    const float right[3] = {
+        up[1] * forward[2] - up[2] * forward[1],
+        up[2] * forward[0] - up[0] * forward[2],
+        up[0] * forward[1] - up[1] * forward[0]
+    };
+
+    // For row vectors: the columns are the camera's axes, the last row the eye taken through them.
+    float view[16] = {};
+    for (int i = 0; i < 3; i++) {
+        view[i * 4 + 0] = right[i];
+        view[i * 4 + 1] = up[i];
+        view[i * 4 + 2] = forward[i];
+        view[12 + 0] -= eye[i] * right[i];
+        view[12 + 1] -= eye[i] * up[i];
+        view[12 + 2] -= eye[i] * forward[i];
+    }
+    view[15] = 1.0f;
+
+    // A camera that isn't one (zeros before the first scene): nothing to take apart with.
+    const float length = forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2];
+    if (!(length > 0.9f && length < 1.1f)) {
+        frame_matrices.clear();
+        frame_ids.clear();
+        return;
+    }
+
+    rt64_set_game_camera((uint32_t)MEM_W(0x30, task), projection, view, frame_matrices.data(), frame_ids.data(), (uint32_t)frame_matrices.size());
+    frame_matrices.clear();
+    frame_ids.clear();
 }

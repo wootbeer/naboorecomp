@@ -1,8 +1,8 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index ac4d898..2b76191 100644
+index ac4d898..27f7190 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
-@@ -8,6 +8,7 @@
+@@ -8,12 +8,14 @@
  #include <atomic>
  #include <chrono>
  #include <thread>
@@ -10,29 +10,46 @@ index ac4d898..2b76191 100644
  #include <cassert>
  #include <cmath>
  #include <cstdio>
-@@ -158,6 +159,7 @@ namespace RT64 {
+ #include <cstdlib>
+ #include <cstring>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include "hle/rt64_interpreter.h"
+@@ -158,6 +160,7 @@ namespace RT64 {
              static std::atomic<int64_t> lastProgressMs{ 0 };
              static uint64_t rdpNs = 0, frameEndNs = 0;
              static int tasksToRAM = 0;
-+            static int matricesSeparated = 0, matricesCombined = 0;
++            static int matricesSeparated = 0, matricesCombined = 0, matricesNamed = 0;
              static uint32_t lastColorWidth = 0;
  
              static int64_t nowMs() {
-@@ -237,10 +239,11 @@ namespace RT64 {
+@@ -237,10 +240,11 @@ namespace RT64 {
                      fprintf(stderr, "[NABOO PERF] the game sent no graphics task for %.0f ms\n", waitedMs);
                  }
                  if (now - last >= std::chrono::seconds(2)) {
 -                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
 -                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
-+                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide; matrices: %d taken apart, %d kept combined), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
-+                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, matricesSeparated, matricesCombined, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
++                    fprintf(stderr, "[NABOO PERF] %d tasks in %.1f s (%d rendered to RAM too, color image %u wide; matrices: %d taken apart (%d named objects), %d kept combined), ms avg/worst: task %.1f/%.1f, microcode %.1f/%.1f, RDP commands %.1f/%.1f, end of frame %.1f/%.1f\n",
++                        tasks, std::chrono::duration<double>(now - last).count(), tasksToRAM, lastColorWidth, matricesSeparated, matricesNamed, matricesCombined, task.total / tasks, task.worst, microcode.total / tasks, microcode.worst,
                          rdp.total / tasks, rdp.worst, frameEnd.total / tasks, frameEnd.worst);
                      tasksToRAM = 0;
-+                    matricesSeparated = matricesCombined = 0;
++                    matricesSeparated = matricesCombined = matricesNamed = 0;
                      fflush(stderr);
                      task = microcode = rdp = frameEnd = Stat();
                      tasks = 0;
-@@ -339,9 +342,49 @@ namespace RT64 {
+@@ -299,6 +303,9 @@ namespace RT64 {
+         constexpr uint32_t HookTriangleReturn = 0x744;      // 0x04001744: the routine's return.
+         constexpr uint32_t HookTransformFirst = 0x890;      // 0x04001890: loads the first two vertices to transform.
+         constexpr uint32_t HookTransformNext = 0x95C;       // 0x0400195C: loads the next two.
++        constexpr uint32_t HookCommandLoop = 0x038;         // 0x04001038: the command loop, on to the next command.
++        constexpr uint32_t HookGenerate = 0xA60;            // 0x04001A60: command 0x05, generated geometry.
++        constexpr uint32_t HookGenerateBE = 0xB08;          // 0x04001B08: command 0xBE, the same.
+ 
+         // The RDP commands the microcode keeps in DMEM until it sends them.
+         constexpr uint32_t RDPStagingAddress = 0xE80;
+@@ -339,9 +346,90 @@ namespace RT64 {
              return !useRDPTriangles;
          }
  
@@ -41,34 +58,75 @@ index ac4d898..2b76191 100644
 -        // nothing is interpolated: frames show as the game makes them.
 +        // Each object comes with its own matrix combining the camera, which RT64 can't pair up
 +        // between frames to interpolate (models come apart), so each is taken apart again:
-+        // The camera's projection, from the game (rt64_set_game_projection: the matrix its
-+        // perspective function has just built), the latest and the one before. With it an
-+        // object's combined matrix comes apart into a projection and a modelview, which is what
-+        // RT64 needs to move the object and the camera between two of the game's frames.
-+        static std::mutex gameProjectionMutex;
-+        static hlslpp::float4x4 gameProjections[2];
-+        static uint32_t gameProjectionCount = 0;
++        // The camera of each frame, from the game (rt64_set_game_camera, as it starts the frame's
++        // graphics task): its perspective matrix and its view matrix (world to camera), kept by
++        // the display list they're for. With them an object's combined matrix comes apart into
++        // its place in the world and the camera's view and projection, which is what RT64 needs
++        // to move the object and the camera between two of the game's frames.
++        struct GameCamera {
++            uint32_t displayList = 0;
++            bool valid = false;
++            hlslpp::float4x4 projection;
++            hlslpp::float4x4 view;
 +
-+        static void setGameProjection(const float *m) {
-+            std::lock_guard<std::mutex> lock(gameProjectionMutex);
-+            gameProjections[1] = gameProjections[0];
-+            // The game keeps it the other way round from the combined matrices (its w row is the
-+            // fourth column there): transposed here.
-+            // The game's object matrices end in 256 rather than 1 (their w), so the projection's
-+            // last row takes the 256 and the modelviews come out as ordinary ones.
++            // The frame's object matrices (RDRAM addresses) and whose each is.
++            std::vector<std::pair<uint32_t, uint32_t>> objects;
++        };
++
++        static std::mutex gameCameraMutex;
++        static GameCamera gameCameras[8];
++        static uint32_t gameCameraCursor = 0;
++
++        static void setGameCamera(uint32_t displayList, const float *m, const float *v, const uint32_t *matrices, const uint32_t *ids, uint32_t count) {
++            std::lock_guard<std::mutex> lock(gameCameraMutex);
++            GameCamera &camera = gameCameras[gameCameraCursor];
++            gameCameraCursor = (gameCameraCursor + 1) % std::size(gameCameras);
++            camera.displayList = displayList & 0x00FFFFFF;
++            camera.valid = true;
++            camera.objects.clear();
++            for (uint32_t i = 0; i < count; i++) {
++                camera.objects.emplace_back(matrices[i], ids[i]);
++            }
++
++            // The game keeps its perspective matrix the other way round from the combined
++            // matrices (its w row is the fourth column there): transposed here. The game's object
++            // matrices end in 256 rather than 1 (their w), so the projection's last row takes
++            // the 256 and the modelviews come out as ordinary ones.
 +            const float w = 256.0f;
-+            gameProjections[0] = hlslpp::float4x4(
++            camera.projection = hlslpp::float4x4(
 +                m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14],
 +                m[3] * w, m[7] * w, m[11] * w, m[15] * w);
-+            gameProjectionCount++;
++            camera.view = hlslpp::float4x4(
++                v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
 +        }
 +
-+        // For the display list being run: the projections, their inverses, and which of them is loaded in RT64.
-+        static hlslpp::float4x4 listProjections[2];
-+        static hlslpp::float4x4 listInverseProjections[2];
++        // For the display list being run: its camera, and whether its view and projection are loaded in RT64.
++        static hlslpp::float4x4 listProjections[1];
++        static hlslpp::float4x4 listInverseProjections[1];
++        static hlslpp::float4x4 listViewProjection;
++        static hlslpp::float4x4 listInverseView;
 +        static uint32_t listProjectionCount = 0;
 +        static int loadedProjection = -1;
 +        static bool modelGroupIgnored = true;
++
++        // Set while the microcode runs a command that generates geometry (0x05: terrain, particles;
++        // 0xBE). That geometry is made again every frame, around the camera, so there's nothing
++        // of it to follow from the frame before: it's drawn as made, under the moving camera.
++        // The display list's object matrices, by their contents (the 32 halves DMEM gets), and the
++        // identity RT64 follows each by: from the object's pointer and, for an object with more
++        // matrices than one, which of them it is.
++        static std::unordered_map<std::string, uint32_t> listObjectIds;
++
++        static void setObjectGroup(State *state, uint32_t id) {
++            modelGroupIgnored = false;
++            state->rsp->matrixId(id, false, false, true,
++                G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
++                G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
++                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_ALLOW, false, false);
++        }
++
++        static bool generatedGeometry = false;
++        static bool hookMatrixGenerated = false;
 +
 +        static void setModelGroup(State *state, bool ignored) {
 +            if (ignored == modelGroupIgnored) {
@@ -85,7 +143,7 @@ index ac4d898..2b76191 100644
          static void disableInterpolation(State *state) {
              RSP *rsp = state->rsp.get();
              for (bool proj : { false, true }) {
-@@ -362,14 +405,14 @@ namespace RT64 {
+@@ -362,14 +450,14 @@ namespace RT64 {
          // region an anchored rectangle was drawn in, this frame or the last, is moved across by as
          // much as the rectangle was, in clip space (x += shift * w). A world model passing behind
          // the radar would be moved with it while it's there.
@@ -103,7 +161,7 @@ index ac4d898..2b76191 100644
              }
  
              // Where the model's origin is, in the framebuffer the rectangles are given in: the
-@@ -382,14 +425,88 @@ namespace RT64 {
+@@ -382,22 +470,109 @@ namespace RT64 {
              const float rectX = halfWidth + (viewportX - halfWidth) * scale;
              const uint16_t origin = RDP::autoAnchorAt(state, int32_t(rectX * 4.0f), int32_t(viewportY * 4.0f));
              if (origin == G_EX_ORIGIN_NONE) {
@@ -150,7 +208,7 @@ index ac4d898..2b76191 100644
 +                }
 +            }
 +
-+            const uint32_t candidates = std::min(listProjectionCount, 2U);
++            const uint32_t candidates = std::min(listProjectionCount, 1U);
 +            for (uint32_t p = 0; p < candidates; p++) {
 +                const hlslpp::float4x4 modelView = hlslpp::mul(combined, listInverseProjections[p]);
 +                float scale = 0.0f;
@@ -172,7 +230,7 @@ index ac4d898..2b76191 100644
 +                RSP *rsp = state->rsp.get();
 +                if (loadedProjection != int(p)) {
 +                    // The viewport's Y scale is the other way up (flipMatrixY), here in the projection.
-+                    hlslpp::float4x4 projection = listProjections[p];
++                    hlslpp::float4x4 projection = listViewProjection;
 +                    for (uint32_t r = 0; r < 4; r++) {
 +                        projection[r][1] = -projection[r][1];
 +                    }
@@ -187,7 +245,19 @@ index ac4d898..2b76191 100644
 +
 +                hlslpp::float4x4 cleaned = modelView;
 +                cleaned[0][3] = 0.0f; cleaned[1][3] = 0.0f; cleaned[2][3] = 0.0f; cleaned[3][3] = 1.0f;
-+                setModelGroup(state, false);
++                cleaned = hlslpp::mul(cleaned, listInverseView);
++                // An object the game named is followed by its name. Generated geometry, and a matrix
++                // the game didn't name, are drawn as made, under the moving camera.
++                const auto it = generatedGeometry ? listObjectIds.end() :
++                    listObjectIds.find(std::string(reinterpret_cast<const char *>(hookMatrixData), sizeof(hookMatrixData)));
++                if (it != listObjectIds.end()) {
++                    setObjectGroup(state, it->second);
++                    Perf::matricesNamed++;
++                }
++                else {
++                    setModelGroup(state, true);
++                }
++
 +                rsp->matrixCommon(cleaned, 0, uint8_t(rsp->loadMask));
 +                return true;
              }
@@ -196,7 +266,17 @@ index ac4d898..2b76191 100644
          }
  
          // The combined matrix the transform uses (DMEM 0x5C0), loaded into RT64 when it changes.
-@@ -406,9 +523,18 @@ namespace RT64 {
+         static void loadHookMatrix(State *state) {
+-            if (hookMatrixLoaded && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
++            if (hookMatrixLoaded && (hookMatrixGenerated == generatedGeometry) && (memcmp(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData)) == 0)) {
+                 return;
+             }
+ 
++            hookMatrixGenerated = generatedGeometry;
+             memcpy(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData));
+             for (uint32_t r = 0; r < 4; r++) {
+                 for (uint32_t c = 0; c < 4; c++) {
+@@ -406,9 +581,18 @@ namespace RT64 {
                  }
              }
  
@@ -216,29 +296,86 @@ index ac4d898..2b76191 100644
              hookMatrixLoaded = true;
          }
  
-@@ -682,6 +808,14 @@ namespace RT64 {
+@@ -593,6 +777,13 @@ namespace RT64 {
+                 return false;
+             case HookTriangleDraw:
+                 return hookTriangleDraw(rsp, state);
++            case HookCommandLoop:
++                generatedGeometry = false;
++                return false;
++            case HookGenerate:
++            case HookGenerateBE:
++                generatedGeometry = true;
++                return false;
+             default:
+                 return false;
+             }
+@@ -612,6 +803,9 @@ namespace RT64 {
+                     rspInterpreter->setHook(HookTriangleDraw, true);
+                     rspInterpreter->setHook(HookTransformFirst, true);
+                     rspInterpreter->setHook(HookTransformNext, true);
++                    rspInterpreter->setHook(HookCommandLoop, true);
++                    rspInterpreter->setHook(HookGenerate, true);
++                    rspInterpreter->setHook(HookGenerateBE, true);
+                 }
+             }
+ 
+@@ -619,6 +813,7 @@ namespace RT64 {
+             rsp->rdpUserData = state;
+             rsp->hookUserData = state;
+             hookGeneration++;
++            generatedGeometry = false;
+             hookMatrixLoaded = false;
+             hookViewportLoaded = false;
+             pendingValid = false;
+@@ -682,6 +877,35 @@ namespace RT64 {
              if (useInterpreter()) {
                  if (useTriangleHooks()) {
                      disableInterpolation(state);
 +                    modelGroupIgnored = true;
 +                    loadedProjection = -1;
-+                    std::lock_guard<std::mutex> lock(gameProjectionMutex);
-+                    listProjectionCount = gameProjectionCount;
-+                    for (uint32_t p = 0; p < 2; p++) {
-+                        listProjections[p] = gameProjections[p];
-+                        listInverseProjections[p] = hlslpp::inverse(gameProjections[p]);
++                    std::lock_guard<std::mutex> lock(gameCameraMutex);
++                    listProjectionCount = 0;
++                    for (const GameCamera &camera : gameCameras) {
++                        if (camera.valid && (camera.displayList == (state->displayListAddress & 0x00FFFFFF))) {
++                            listProjections[0] = camera.projection;
++                            listInverseProjections[0] = hlslpp::inverse(camera.projection);
++                            listViewProjection = hlslpp::mul(camera.view, camera.projection);
++                            listInverseView = hlslpp::inverse(camera.view);
++                            listProjectionCount = 1;
++                            listObjectIds.clear();
++                            std::unordered_map<uint32_t, uint32_t> seen;
++                            for (const auto &object : camera.objects) {
++                                if (object.first + 0x40 > 0x800000) {
++                                    continue;
++                                }
++
++                                // As copyToDMEM leaves the matrix in DMEM.
++                                uint8_t data[0x40];
++                                const uint8_t *rdram = state->fromRDRAM(0);
++                                memcpy(data, &rdram[object.first], sizeof(data));
++                                const uint32_t part = seen[object.second]++;
++                                uint32_t id = (object.second * 2654435761U) ^ (part * 40503U);
++                                id = (id % 0xFFFFFF00U) + 1;
++                                listObjectIds.emplace(std::string(reinterpret_cast<const char *>(data), sizeof(data)), id);
++                            }
++                        }
 +                    }
                  }
  
                  // In play nothing reads the framebuffer back from RAM (effects that sample it go
-@@ -1564,3 +1698,8 @@ namespace RT64 {
+@@ -1564,3 +1788,12 @@ namespace RT64 {
          }
      }
  };
 +
-+// Called by the game with the perspective matrix its camera has just built (16 floats, rows first).
-+extern "C" void rt64_set_game_projection(const float *matrix) {
-+    RT64::GBI_F3DNABOO::setGameProjection(matrix);
++// Called by the game as it starts a frame's graphics task: the task's display list, the camera's
++// perspective matrix (16 floats, as the game keeps it) and its view matrix (16 floats, rows first,
++// for row vectors: world to camera).
++extern "C" void rt64_set_game_camera(uint32_t displayList, const float *projection, const float *view,
++    const uint32_t *matrices, const uint32_t *ids, uint32_t count)
++{
++    RT64::GBI_F3DNABOO::setGameCamera(displayList, projection, view, matrices, ids, count);
 +}
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
 index 15f172e..81f9938 100644
@@ -294,10 +431,28 @@ index 15f172e..81f9938 100644
      }
      
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 82a3f5b..47f4d8a 100644
+index 82a3f5b..afdc61f 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -1002,6 +1002,13 @@ namespace RT64 {
+@@ -263,6 +263,17 @@ namespace RT64 {
+             break;
+         }
+ 
++        // A test switch (RT64_TEST_TARGET_RATE=120): the display's rate to generate frames for, where
++        // the test window has none of its own.
++        static const uint32_t testTargetRate = []() {
++            const char *value = getenv("RT64_TEST_TARGET_RATE");
++            return (value != nullptr) ? uint32_t(atoi(value)) : 0U;
++        }();
++
++        if (testTargetRate > 0) {
++            workloadConfig.targetRate = testTargetRate;
++        }
++
+         // Store the rate that was chosen for the configuration.
+         ext.sharedResources->targetRate = workloadConfig.targetRate;
+ 
+@@ -1002,6 +1013,25 @@ namespace RT64 {
                      }
                  }
  
@@ -305,13 +460,25 @@ index 82a3f5b..47f4d8a 100644
 +                // between two of the game's, and none of the game's own, to look at what's generated.
 +                static const bool onlyHalfwayFrames = []() {
 +                    const char *value = getenv("RT64_ONLY_HALFWAY_FRAMES");
++                    return (value != nullptr) && ((value[0] == '1') || (value[0] == '2'));
++                }();
++
++                static const bool alternateHalfwayFrames = []() {
++                    const char *value = getenv("RT64_ONLY_HALFWAY_FRAMES");
++                    return (value != nullptr) && (value[0] == '2');
++                }();
++
++                // A test switch (RT64_TEST_NO_FRAME_SKIP=1): every generated frame is rendered however
++                // late it is, for a renderer too slow to keep up (everything slows down instead).
++                static const bool testNoFrameSkip = []() {
++                    const char *value = getenv("RT64_TEST_NO_FRAME_SKIP");
 +                    return (value != nullptr) && (value[0] == '1');
 +                }();
 +
                  float prevFrameWeight = 0.0f;
                  float curFrameWeight = 1.0f;
                  float deltaTimeMs = 1.0f / 30.0f;
-@@ -1018,7 +1025,7 @@ namespace RT64 {
+@@ -1018,7 +1048,7 @@ namespace RT64 {
                      matchingProfiler.log();
  
                      const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
@@ -320,13 +487,25 @@ index 82a3f5b..47f4d8a 100644
  
                      const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal;
                      if (resetTicks) {
-@@ -1137,6 +1144,10 @@ namespace RT64 {
+@@ -1098,7 +1128,7 @@ namespace RT64 {
+                 int64_t renderTimeTotalMicro = 0;
+                 for (uint32_t frame = 0; (frame < displayFrames) && !skipWorkloadNow; frame++) {
+                     // Evaluate if this frame should be skipped. Measure the current time and compare it to what frame is estimated should be have been rendered by now.
+-                    if ((frame > 0) && (originalTimeMicro > 0)) {
++                    if ((frame > 0) && (originalTimeMicro > 0) && !testNoFrameSkip) {
+                         const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
+                         const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
+                         const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
+@@ -1137,6 +1167,13 @@ namespace RT64 {
                          curFrameWeight = workload.debuggerRenderer.interpolationWeight;
                          prevFrameWeight = 1.0f - curFrameWeight;
                      }
 +                    else if (onlyHalfwayFrames && requiresFrameMatching) {
-+                        prevFrameWeight = 0.5f;
-+                        curFrameWeight = 0.5f;
++                        // With 2, every other frame instead: halfway, then one of the game's own.
++                        static bool whole = false;
++                        whole = alternateHalfwayFrames && !whole;
++                        prevFrameWeight = whole ? 0.0f : 0.5f;
++                        curFrameWeight = whole ? 1.0f : 0.5f;
 +                    }
                      else {
                          prevFrameWeight = 0.0f;

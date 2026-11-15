@@ -149,7 +149,7 @@ text = "    ctx->r14 = S32(0XC00 << 16); func_40023734(rdram, ctx); return;"
 [[patches.hook]]
 func = "func_40023558"
 before_vram = 0x40023558
-text = "    { extern void naboo_gfx_dump(uint8_t *rdram); naboo_gfx_dump(rdram); }"
+text = "    { extern void naboo_gfx_dump(uint8_t *rdram); naboo_gfx_dump(rdram); extern void naboo_camera_for_task(uint8_t *rdram); naboo_camera_for_task(rdram); }"
 
 # Boot stub: no COP0 (Wired, Context, Index), and fall through to its
 # `j func_4003A4DC` at 0x4000044C instead of jumping there through the
@@ -423,11 +423,28 @@ func = "func_40004308"
 before_vram = 0x40004590
 text = "    { extern void naboo_loader_progress(uint8_t *rdram); naboo_loader_progress(rdram); }"
 
-# func_4001A078, once its perspective matrix is complete ($s0 the matrix, before the
-# function's exit): the camera's (0x4007D9B0) goes to RT64, which takes each object's
-# combined matrix apart with it for frame interpolation (src/game/widescreen.cpp,
-# lib-patches/rt64/0030, STATUS.md round 27).
+# The four places that write the object matrix command (0105C03F) into the display list: each
+# tells the port which matrix it is and whose (naboo_object_matrix, src/game/widescreen.cpp),
+# for RT64 to follow objects between frames (STATUS.md round 30).
+# func_40008F40: the draw entry in $s6 (+8 the matrix, +0x10 the object).
 [[patches.hook]]
-func = "func_4001A078"
-before_vram = 0x4001A128
-text = "    { extern void naboo_projection_built(uint8_t *rdram, gpr matrix); naboo_projection_built(rdram, ctx->r16); }"
+func = "func_40008F40"
+before_vram = 0x400094C8
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, MEM_W(0x8, ctx->r22), MEM_W(0x10, ctx->r22)); }"
+
+# func_4000A2E8: entry $s1 of the table at 0x40071B60 (+4 the matrix, in $a0; +0xC the object).
+[[patches.hook]]
+func = "func_4000A2E8"
+before_vram = 0x4000A444
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, MEM_W(0xC, (gpr)(int32_t)(0x40071B60 + ((uint32_t)ctx->r17 << 4)))); }"
+
+# func_40012BC0, twice: one of two matrices of the scene's own ($a0).
+[[patches.hook]]
+func = "func_40012BC0"
+before_vram = 0x400135E0
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, 0x10); }"
+
+[[patches.hook]]
+func = "func_40012BC0"
+before_vram = 0x40014198
+text = "    { extern void naboo_object_matrix(uint8_t *rdram, gpr matrix, gpr object); naboo_object_matrix(rdram, ctx->r4, 0x20); }"
