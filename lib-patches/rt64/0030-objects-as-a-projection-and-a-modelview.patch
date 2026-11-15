@@ -1,5 +1,5 @@
 diff --git a/src/gbi/rt64_gbi_f3dnaboo.cpp b/src/gbi/rt64_gbi_f3dnaboo.cpp
-index ac4d898..27f7190 100644
+index ac4d898..1edcd7b 100644
 --- a/src/gbi/rt64_gbi_f3dnaboo.cpp
 +++ b/src/gbi/rt64_gbi_f3dnaboo.cpp
 @@ -8,12 +8,14 @@
@@ -49,7 +49,7 @@ index ac4d898..27f7190 100644
  
          // The RDP commands the microcode keeps in DMEM until it sends them.
          constexpr uint32_t RDPStagingAddress = 0xE80;
-@@ -339,9 +346,90 @@ namespace RT64 {
+@@ -339,9 +346,162 @@ namespace RT64 {
              return !useRDPTriangles;
          }
  
@@ -125,6 +125,78 @@ index ac4d898..27f7190 100644
 +                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_ALLOW, false, false);
 +        }
 +
++        // Whether an object carries on from the frame before. The pointer it's known by can be a
++        // slot the game has since given to something else (an ember on the ground one frame, a new
++        // bolt the next: drawn between the two it streaked through the craft), and a bolt is
++        // first drawn at its gun, pointing another way. So an object is followed only when it was
++        // drawn in both frames before, hasn't turned by more than about 30 degrees or changed
++        // size by a quarter, and has moved about as it did the frame before; otherwise it's drawn
++        // as made for this frame.
++        struct ObjectPlace {
++            float axes[3][3];
++            float lengths[3];
++            float position[3];
++            float moved[3];
++            bool hasMoved;
++            uint32_t list;
++            bool follow;
++        };
++
++        static std::unordered_map<uint32_t, ObjectPlace> objectPlaces;
++        static uint32_t objectList = 0;
++
++        static bool followObject(uint32_t id, const hlslpp::float4x4 &world) {
++            const auto it = objectPlaces.find(id);
++            if ((it != objectPlaces.end()) && (it->second.list == objectList)) {
++                // Loaded again in the same display list.
++                return it->second.follow;
++            }
++
++            ObjectPlace place = {};
++            for (uint32_t r = 0; r < 3; r++) {
++                float length = 0.0f;
++                for (uint32_t c = 0; c < 3; c++) {
++                    place.axes[r][c] = float(world[r][c]);
++                    length += place.axes[r][c] * place.axes[r][c];
++                }
++
++                length = std::sqrt(length);
++                place.lengths[r] = length;
++                for (uint32_t c = 0; c < 3; c++) {
++                    place.axes[r][c] = (length > 0.0f) ? (place.axes[r][c] / length) : 0.0f;
++                }
++
++                place.position[r] = float(world[3][r]);
++            }
++
++            place.list = objectList;
++            if ((it != objectPlaces.end()) && (it->second.list + 1 == objectList)) {
++                const ObjectPlace &before = it->second;
++                bool same = true;
++                float change = 0.0f, speed = 0.0f, speedBefore = 0.0f;
++                for (uint32_t r = 0; r < 3; r++) {
++                    float dot = 0.0f;
++                    for (uint32_t c = 0; c < 3; c++) {
++                        dot += place.axes[r][c] * before.axes[r][c];
++                    }
++
++                    same = same && (dot > 0.866f);
++                    same = same && (place.lengths[r] < before.lengths[r] * 1.25f) && (before.lengths[r] < place.lengths[r] * 1.25f);
++                    place.moved[r] = place.position[r] - before.position[r];
++                    change += (place.moved[r] - before.moved[r]) * (place.moved[r] - before.moved[r]);
++                    speed += place.moved[r] * place.moved[r];
++                    speedBefore += before.moved[r] * before.moved[r];
++                }
++
++                place.hasMoved = true;
++                const float allowed = 3.0f + 0.5f * std::sqrt(std::max(speed, speedBefore));
++                place.follow = same && before.hasMoved && (change < allowed * allowed);
++            }
++
++            objectPlaces[id] = place;
++            return place.follow;
++        }
++
 +        static bool generatedGeometry = false;
 +        static bool hookMatrixGenerated = false;
 +
@@ -143,7 +215,7 @@ index ac4d898..27f7190 100644
          static void disableInterpolation(State *state) {
              RSP *rsp = state->rsp.get();
              for (bool proj : { false, true }) {
-@@ -362,14 +450,14 @@ namespace RT64 {
+@@ -362,14 +522,14 @@ namespace RT64 {
          // region an anchored rectangle was drawn in, this frame or the last, is moved across by as
          // much as the rectangle was, in clip space (x += shift * w). A world model passing behind
          // the radar would be moved with it while it's there.
@@ -161,16 +233,14 @@ index ac4d898..27f7190 100644
              }
  
              // Where the model's origin is, in the framebuffer the rectangles are given in: the
-@@ -382,22 +470,109 @@ namespace RT64 {
+@@ -382,22 +542,109 @@ namespace RT64 {
              const float rectX = halfWidth + (viewportX - halfWidth) * scale;
              const uint16_t origin = RDP::autoAnchorAt(state, int32_t(rectX * 4.0f), int32_t(viewportY * 4.0f));
              if (origin == G_EX_ORIGIN_NONE) {
 -                return;
 +                return false;
-             }
- 
--            const float shift = ((origin == G_EX_ORIGIN_RIGHT) ? 1.0f : -1.0f) * rt64_ext_aspect_percentage * (1.0f - 1.0f / scale);
--            hlslpp::float4x4 &m = state->rsp->modelViewProjMatrix;
++            }
++
 +            if (apply) {
 +                const float shift = ((origin == G_EX_ORIGIN_RIGHT) ? 1.0f : -1.0f) * rt64_ext_aspect_percentage * (1.0f - 1.0f / scale);
 +                hlslpp::float4x4 &m = state->rsp->modelViewProjMatrix;
@@ -198,8 +268,10 @@ index ac4d898..27f7190 100644
 +
 +            if (combinedOnly || (listProjectionCount == 0) || anchorHudModel(state, false)) {
 +                return false;
-+            }
-+
+             }
+ 
+-            const float shift = ((origin == G_EX_ORIGIN_RIGHT) ? 1.0f : -1.0f) * rt64_ext_aspect_percentage * (1.0f - 1.0f / scale);
+-            hlslpp::float4x4 &m = state->rsp->modelViewProjMatrix;
 +            hlslpp::float4x4 combined;
              for (uint32_t r = 0; r < 4; r++) {
 -                m[r][0] = m[r][0] + shift * m[r][3];
@@ -250,7 +322,7 @@ index ac4d898..27f7190 100644
 +                // the game didn't name, are drawn as made, under the moving camera.
 +                const auto it = generatedGeometry ? listObjectIds.end() :
 +                    listObjectIds.find(std::string(reinterpret_cast<const char *>(hookMatrixData), sizeof(hookMatrixData)));
-+                if (it != listObjectIds.end()) {
++                if ((it != listObjectIds.end()) && followObject(it->second, cleaned)) {
 +                    setObjectGroup(state, it->second);
 +                    Perf::matricesNamed++;
 +                }
@@ -276,7 +348,7 @@ index ac4d898..27f7190 100644
              memcpy(hookMatrixData, &dmem[0x5C0], sizeof(hookMatrixData));
              for (uint32_t r = 0; r < 4; r++) {
                  for (uint32_t c = 0; c < 4; c++) {
-@@ -406,9 +581,18 @@ namespace RT64 {
+@@ -406,9 +653,18 @@ namespace RT64 {
                  }
              }
  
@@ -296,7 +368,7 @@ index ac4d898..27f7190 100644
              hookMatrixLoaded = true;
          }
  
-@@ -593,6 +777,13 @@ namespace RT64 {
+@@ -593,6 +849,13 @@ namespace RT64 {
                  return false;
              case HookTriangleDraw:
                  return hookTriangleDraw(rsp, state);
@@ -310,7 +382,7 @@ index ac4d898..27f7190 100644
              default:
                  return false;
              }
-@@ -612,6 +803,9 @@ namespace RT64 {
+@@ -612,6 +875,9 @@ namespace RT64 {
                      rspInterpreter->setHook(HookTriangleDraw, true);
                      rspInterpreter->setHook(HookTransformFirst, true);
                      rspInterpreter->setHook(HookTransformNext, true);
@@ -320,7 +392,7 @@ index ac4d898..27f7190 100644
                  }
              }
  
-@@ -619,6 +813,7 @@ namespace RT64 {
+@@ -619,6 +885,7 @@ namespace RT64 {
              rsp->rdpUserData = state;
              rsp->hookUserData = state;
              hookGeneration++;
@@ -328,7 +400,7 @@ index ac4d898..27f7190 100644
              hookMatrixLoaded = false;
              hookViewportLoaded = false;
              pendingValid = false;
-@@ -682,6 +877,35 @@ namespace RT64 {
+@@ -682,6 +949,60 @@ namespace RT64 {
              if (useInterpreter()) {
                  if (useTriangleHooks()) {
                      disableInterpolation(state);
@@ -344,9 +416,28 @@ index ac4d898..27f7190 100644
 +                            listInverseView = hlslpp::inverse(camera.view);
 +                            listProjectionCount = 1;
 +                            listObjectIds.clear();
++
++                            // One pointer can stand for many things drawn (an effect's pieces: bolts,
++                            // embers), told apart only by their order, which changes as pieces come
++                            // and go: a new bolt took the place in the order of an ember on the
++                            // ground and was drawn stretched between the two. So when the number of
++                            // matrices under a pointer isn't what it was the frame before, none of
++                            // them is followed this frame.
++                            static std::unordered_map<uint32_t, uint32_t> previousCounts;
++                            std::unordered_map<uint32_t, uint32_t> counts;
++                            for (const auto &object : camera.objects) {
++                                counts[object.second]++;
++                            }
++
 +                            std::unordered_map<uint32_t, uint32_t> seen;
 +                            for (const auto &object : camera.objects) {
 +                                if (object.first + 0x40 > 0x800000) {
++                                    continue;
++                                }
++
++                                const auto previous = previousCounts.find(object.second);
++                                const uint32_t count = counts[object.second];
++                                if ((count > 1) && ((previous == previousCounts.end()) || (previous->second != count))) {
 +                                    continue;
 +                                }
 +
@@ -359,12 +450,18 @@ index ac4d898..27f7190 100644
 +                                id = (id % 0xFFFFFF00U) + 1;
 +                                listObjectIds.emplace(std::string(reinterpret_cast<const char *>(data), sizeof(data)), id);
 +                            }
++
++                            previousCounts = std::move(counts);
++                            objectList++;
++                            if (objectPlaces.size() > 8192) {
++                                objectPlaces.clear();
++                            }
 +                        }
 +                    }
                  }
  
                  // In play nothing reads the framebuffer back from RAM (effects that sample it go
-@@ -1564,3 +1788,12 @@ namespace RT64 {
+@@ -1564,3 +1885,12 @@ namespace RT64 {
          }
      }
  };
@@ -378,7 +475,7 @@ index ac4d898..27f7190 100644
 +    RT64::GBI_F3DNABOO::setGameCamera(displayList, projection, view, matrices, ids, count);
 +}
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index 15f172e..81f9938 100644
+index 15f172e..65b0b20 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
 @@ -34,6 +34,10 @@ extern "C" uint32_t rt64_auto_anchor_fb_width = 0;
@@ -392,7 +489,39 @@ index 15f172e..81f9938 100644
  // Counted by the game each time it sets rt64_auto_anchor_fb_width for a frame.
  extern "C" uint32_t rt64_auto_anchor_serial = 0;
  
-@@ -1411,6 +1415,37 @@ namespace RT64 {
+@@ -161,9 +165,22 @@ namespace RT64 {
+         }
+     }
+     
++    // While frames aren't rendered to RAM too (State::setRenderToRAM(0)), nothing shows that the
++    // memory of an old framebuffer has since been written over, as RAM isn't compared with what
++    // was rendered. A framebuffer of another width than the one being drawn to is from another
++    // screen (a menu's), its memory by now the game's own again: a texture loaded from there is
++    // a texture, not a piece of that old picture (which drew effects as flat squares).
++    bool RDP::staleFramebuffer(const Framebuffer *fb) const {
++        return (fb != nullptr) && (state->extended.renderToRAM == 0) && (fb->width != colorImage.width);
++    }
++
+     void RDP::checkFramebufferOverlap(uint32_t tmemStart, uint32_t tmemWords, uint32_t tmemMask, uint32_t addressStart, uint32_t addressEnd, uint32_t tileWidth, uint32_t tileHeight, bool RGBA32, bool makeTileCopy) {
+         auto &fbManager = state->framebufferManager;
+         Framebuffer *fb = fbManager.findMostRecentContaining(addressStart, addressEnd);
++        if (staleFramebuffer(fb)) {
++            return;
++        }
++
+         if (fb != nullptr) {
+             const bool gpuCopiesEnabled = state->ext.emulatorConfig->framebuffer.copyWithGPU;
+             if (!gpuCopiesEnabled) {
+@@ -707,7 +724,7 @@ namespace RT64 {
+         checkImageOverlap(textureStart, textureEnd);
+ 
+         Framebuffer *framebuffer = state->framebufferManager.findMostRecentContaining(textureStart, textureEnd);
+-        if (framebuffer != nullptr) {
++        if ((framebuffer != nullptr) && !staleFramebuffer(framebuffer)) {
+             FramebufferTile fbTile;
+             const bool RGBA32 = (t.siz == G_IM_SIZ_32b) && (t.fmt == G_IM_FMT_RGBA);
+             const uint32_t lineShift = RGBA32 ? 1 : 0;
+@@ -1411,6 +1428,37 @@ namespace RT64 {
              }
          }
  
@@ -430,6 +559,42 @@ index 15f172e..81f9938 100644
          drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip, extended.global.rect);
      }
      
+diff --git a/src/hle/rt64_rdp.h b/src/hle/rt64_rdp.h
+index 26d673f..6c9a43a 100644
+--- a/src/hle/rt64_rdp.h
++++ b/src/hle/rt64_rdp.h
+@@ -145,6 +145,7 @@ namespace RT64 {
+         void reset();
+         void crash(CrashReason reason);
+         void checkFramebufferPair();
++        bool staleFramebuffer(const Framebuffer *fb) const;
+         void checkFramebufferOverlap(uint32_t tmemStart, uint32_t tmemWords, uint32_t tmemMask, uint32_t addressStart, uint32_t addressEnd, uint32_t tileWidth, uint32_t tileHeight, bool RGBA32, bool makeTileCopy);
+         void checkImageOverlap(uint32_t addressStart, uint32_t addressEnd);
+         int32_t movedFromOrigin(int32_t x, uint16_t ori);
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 422240b..e68580c 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1606,6 +1606,19 @@ namespace RT64 {
+             RT64_PERF_MARK("uploading textures");
+         }
+ 
++        // The textures this frame draws with are in use as of this frame. Rendering to RAM marks
++        // them so on the way; without it only the workload queue would, when it gets to the frame,
++        // and a texture last drawn long enough ago was evicted here first, with the frame that
++        // draws it again still waiting in the queue: drawn without its texture (an effect as a flat square).
++        if (!renderToRDRAM) {
++            for (const DrawCallTile &callTile : workload.drawData.callTiles) {
++                if (callTile.valid && (callTile.tmemHashOrID != 0)) {
++                    uint32_t textureIndex = 0;
++                    ext.textureCache->useTexture(callTile.tmemHashOrID, workload.submissionFrame, textureIndex);
++                }
++            }
++        }
++
+         // Evict from the texture cache that are too old and should no longer be maintained.
+         // The texture manager should also be notified of any hashes that were removed.
+         if (ext.textureCache->evict(workloadCounter, evictedTextureHashes)) {
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
 index 82a3f5b..afdc61f 100644
 --- a/src/hle/rt64_workload_queue.cpp
