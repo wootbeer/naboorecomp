@@ -164,7 +164,8 @@ Builds Release in `build-release-linux/` (or `$BUILD_DIR`) and writes
 assets, README, license and third-party license notices. SDL2, GTK 3,
 FreeType and Vulkan come from the system; the binary needs glibc 2.38 or
 newer if built on Ubuntu 24.04. Settings and saves go to
-`~/.config/naboorecomp` (or the game folder with `portable.txt`).
+the game folder (`portable.txt`, created on a first run) or, for an
+install that already has them there, `~/.config/naboorecomp`.
 
 ## Troubleshooting (Windows)
 

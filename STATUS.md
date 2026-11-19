@@ -6,7 +6,7 @@ is for finding out why something is the way it is. Same format as the
 BattleTanx: Global Assault port's STATUS.md, whose lessons are referred to as
 "the BattleTanx port, round N".
 
-## Overview (as of round 37)
+## Overview (as of round 38)
 
 **Where it stands.** The game's code recompiles cleanly and boots on Linux:
 the launcher, the ROM check, osInitialize, the memory setup, all of the
@@ -43,6 +43,37 @@ in 3D (for widescreen and interpolation) is in progress.
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
 # Log
+
+## 2026-11-19, round 38: portable by default; command-line options
+
+The user: make portable the default, leaving anyone not portable as they
+are; command-line options for nearly every setting, going straight into the
+game and selecting the ROM.
+
+- **Portable by default** (`naboo::cli::choose_data_folder`,
+  `src/main/command_line.cpp`): with no `portable.txt` in the folder it's
+  started from, and nothing yet in the per-user folder
+  (`%LOCALAPPDATA%\naboorecomp`, `~/.config/naboorecomp`), the game creates
+  `portable.txt` and keeps everything there. An install with data in the
+  per-user folder stays there. `--portable`, `--no-portable`,
+  `--data-dir`. Checked here with throwaway HOME folders: a new user turns
+  portable, an existing one keeps their settings (volume 55 read back).
+  Portable data in the repository's root is git-ignored.
+- **Command line** (`--help`): `--rom` (`recomp::select_rom`, the
+  launcher's own check; a bad ROM is reported and with `--play` exits 1),
+  `--play` (adds the runtime's `--game naboo`), `--set tab.option=value`
+  for any option of the General, Graphics and Sound configs, short names
+  for the usual ones (`--fullscreen`, `--msaa`, `--framerate` and so on),
+  `--list-settings`, `--save-settings` (otherwise for that launch only),
+  and the game's switches as flags (`--perf`, `--no-frame-interpolation`,
+  `--smooth-frames`, `--audio-headroom`, `--dump-dir`, `--heap-check`).
+  Applied after the saved settings load, through the configs' own
+  set/apply (so change callbacks run). Unknown options or values: an
+  error and exit 2, before any window. On Windows the release build
+  attaches to the console it was started from for this output.
+  Checked: every alias and the errors; values not saved without
+  `--save-settings` and saved with it; `--rom` + `--play` into a new data
+  folder boots straight into the game.
 
 ## 2026-11-15, round 37: the abort wipe across the wide picture; the menu after a quit; edge culling
 

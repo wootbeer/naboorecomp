@@ -81,3 +81,14 @@ build-release-linux/
 
 # Local test runs (portable folder with the game and its saves)
 /run/
+
+# Portable data (a portable.txt in the folder the game is started from keeps
+# settings, saves and mods there; new installs are portable by default)
+/portable.txt
+/general.json
+/graphics.json
+/sound.json
+/controls.json
+/mods.json
+/saves/
+/mod_config/

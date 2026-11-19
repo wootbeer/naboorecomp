@@ -25,7 +25,28 @@ SHA-1 of the dump (as `.n64`, byte-swapped):
 SHA-1 once normalized to `.z64`:
 E4441A6EEB67861408C2E009BAAE8AAD4DF34021
 
-Add a blank portable.txt in the application's folder to make portable if you want to save settings locally.
+## Where settings and saves go
+New installs are portable: settings, saves and mods are kept in the game's
+folder (the folder it's started from), marked by a `portable.txt` the game
+creates there on its first run. If you already have them in the per-user
+folder (`%LOCALAPPDATA%\naboorecomp` on Windows, `~/.config/naboorecomp` on
+Linux), they stay there. To switch, create or delete `portable.txt`.
+
+## Command line
+`NabooRecompiled --help` lists every option. The main ones:
+
+- `--rom <file>` uses this ROM (checked and stored, like Select ROM).
+- `--play` goes straight into the game, skipping the launcher.
+- Any setting from the General, Graphics or Sound tab:
+  `--set graphics.msaa_option=MSAA4X`, or a short name such as
+  `--fullscreen`, `--msaa`, `--resolution`, `--framerate`, `--volume`.
+  `--list-settings` shows them all with the values they take. They apply to
+  that launch; add `--save-settings` to keep them.
+- `--portable`, `--no-portable`, `--data-dir <folder>` choose where data goes.
+- Game switches: `--no-frame-interpolation`, `--perf`, `--dump-dir <folder>`.
+
+For example:
+`NabooRecompiled --rom "Battle for Naboo (USA).z64" --play --fullscreen --framerate 120`
 
 ## Building
 See [BUILDING.md](BUILDING.md).

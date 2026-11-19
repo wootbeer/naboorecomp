@@ -55,6 +55,7 @@
 #include "librecomp/helpers.hpp"
 
 #include "naboo_config.h"
+#include "naboo_command_line.h"
 
 #if defined(NABOO_HAS_APP_ICON)
 #include "icon_bytes.h"
@@ -575,8 +576,36 @@ void naboo_report_fatal_error(const char* message);
     std::abort();
 }
 
+static const char* rom_error_text(recomp::RomValidationError error) {
+    switch (error) {
+    case recomp::RomValidationError::Good: return "good";
+    case recomp::RomValidationError::FailedToOpen: return "couldn't open the file";
+    case recomp::RomValidationError::NotARom: return "not an N64 ROM";
+    case recomp::RomValidationError::IncorrectRom: return "a ROM of another game";
+    case recomp::RomValidationError::NotYet: return "a ROM this version doesn't support yet";
+    case recomp::RomValidationError::IncorrectVersion: return "another version of the game (the USA release is needed)";
+    default: return "couldn't be used";
+    }
+}
+
 int main(int argc, char** argv) {
     std::set_terminate(report_unhandled_exception_and_abort);
+
+    // Command-line options (src/main/command_line.cpp; --help lists them). The game's own
+    // switches (--perf and so on) are set as environment variables right here.
+    const naboo::cli::Options cli_options = naboo::cli::parse(argc, argv);
+    if (cli_options.help) {
+        naboo::cli::attach_console();
+        naboo::cli::print_help();
+        return EXIT_SUCCESS;
+    }
+    if (!cli_options.errors.empty()) {
+        naboo::cli::attach_console();
+        for (const std::string& error : cli_options.errors) {
+            fprintf(stderr, "NabooRecompiled: %s\n", error.c_str());
+        }
+        return 2;
+    }
 
     recomp::Version project_version{};
     if (!recomp::Version::from_string(version_string, project_version)) {
@@ -604,10 +633,24 @@ int main(int argc, char** argv) {
     // loaded (STATUS.md round 86).
     recompui::register_primary_font("Exo2.ttf", "Exo 2");
 
-    recomp::register_config_path(recompui::file::get_app_folder_path());
+    // Portable (settings, saves and mods in the folder it's started from) unless this
+    // install already keeps them in the per-user folder; --data-dir to choose.
+    recomp::register_config_path(naboo::cli::choose_data_folder(cli_options));
 
     for (const auto& game : supported_games) {
         recomp::register_game(game);
+    }
+
+    if (cli_options.rom) {
+        const recomp::RomValidationError rom_result = recomp::select_rom(*cli_options.rom, supported_games[0].game_id);
+        if (rom_result != recomp::RomValidationError::Good) {
+            naboo::cli::attach_console();
+            fprintf(stderr, "NabooRecompiled: the ROM \"%s\" %s %s.\n", cli_options.rom->string().c_str(),
+                (rom_result == recomp::RomValidationError::FailedToOpen) ? "-" : "is", rom_error_text(rom_result));
+            if (cli_options.play) {
+                return 1;
+            }
+        }
     }
 
     recompinput::players::set_single_player_mode(true);
@@ -626,6 +669,20 @@ int main(int argc, char** argv) {
     recompui::config::create_sound_tab();
     recompui::config::create_mods_tab();
     recompui::config::finalize();
+
+    // Settings from the command line, over the saved ones.
+    if (!naboo::cli::apply_settings(cli_options)) {
+        naboo::cli::attach_console();
+        if (cli_options.list_settings) {
+            naboo::cli::list_settings();
+        }
+        return 2;
+    }
+    if (cli_options.list_settings) {
+        naboo::cli::attach_console();
+        naboo::cli::list_settings();
+        return EXIT_SUCCESS;
+    }
 
     // Read from the just-loaded config; takes effect on the next launch if
     // changed in the menu.
@@ -683,9 +740,17 @@ int main(int argc, char** argv) {
     // Last of the atexit handlers, so it runs first (src/main/crash_handler.cpp).
     naboo_install_exit_trace();
 
+    // The runtime gets its own options (--game, --game-mode; --play adds --game naboo).
+    std::vector<char*> runtime_argv{ argv[0] };
+    std::vector<std::string> runtime_args = cli_options.runtime_args;
+    for (std::string& arg : runtime_args) {
+        runtime_argv.push_back(arg.data());
+    }
+    runtime_argv.push_back(nullptr);
+
     recomp::start({
-        .argc = argc,
-        .argv = argv,
+        .argc = int(runtime_argv.size() - 1),
+        .argv = runtime_argv.data(),
         .project_version = project_version,
         .window_handle = {}, // created by gfx_callbacks.create_window
         .rsp_callbacks = rsp_callbacks,
