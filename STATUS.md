@@ -39,6 +39,11 @@ in 3D (for widescreen and interpolation) is in progress.
   `tools/mupen_watch.c` run the game in mupen64plus's core to compare RAM
   and find which code writes an address.
 
+**Branches.** The repository is public. Work goes on
+`claude/gracious-brown-fbggpp` and, at the end of each round, `main` is
+fast-forwarded to it (the owner's choice, 2026-11-24), so `main` always shows
+current progress.
+
 **Principle.** The game stays original: fixes cover only what differs from
 the N64 (timing, rendering, the runtime), not the game's look or behaviour.
 
