@@ -16,8 +16,8 @@ missions play through, with widescreen, sound, saves and controller support.
 There are known rough edges (see [PROGRESS.md](PROGRESS.md)), and there are
 no releases yet: to play, build it yourself ([BUILDING.md](BUILDING.md)).
 
-Development happens on the `claude/gracious-brown-fbggpp` branch;
-[STATUS.md](STATUS.md) is the detailed log of every round of work.
+`main` follows the work as it happens; [STATUS.md](STATUS.md) is the
+detailed log of every round.
 
 ## Game Files
 You need your own data files: Star Wars Episode I - Battle for Naboo (USA).n64
