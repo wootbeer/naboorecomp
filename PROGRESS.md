@@ -10,49 +10,44 @@ tooling as the BattleTanx: Global Assault port.
 
 ## Working
 
-- **Recompilation**: both code segments (`.main` at `0x40000400`, `.paged` at
-  `0x41000000`, about 1.2 MB of MIPS code, 2,333 functions) recompile with no
-  errors. The symbol file is generated from a splat split
-  (`tools/splat_to_syms.py`), with libultra named from n64sym's signatures.
-- **The game's TLB use**: the code runs at `0x40000000`/`0x41000000` through
-  the TLB, with the second segment paged in from ROM on demand on the N64.
-  The port reduces every address to its physical offset (patches to
-  N64Recomp's `recomp.h` and the runtime) and loads the paged segment once at
-  boot.
-- **Boot**: the launcher with the ROM picker (and the hash check for this
-  release), then the game's own boot: `osInitialize` (with the clock-rate
-  scaling the BattleTanx port had to find in its round 138), the memory
-  setup, all of the game's threads, VI events, the video mode, the game's
-  file loader, and on into its title screen and first 3D scenes, matching
-  the game on an emulator and without crashing (STATUS.md round 13).
-- **Audio microcode**: MusyX located and run through RSPRecomp (first pass).
+- **The whole game boots and plays**: launcher and ROM check, intro, menus,
+  craft select, and missions through to their end screens. Both code
+  segments (about 1.2 MB of MIPS code, 2,333 functions) recompile cleanly.
+- **Graphics**: RT64 runs Factor 5's own graphics microcode in an RSP
+  interpreter, so the terrain, sky, particles and text it generates all
+  draw. Models go through RT64 in 3D.
+- **Widescreen**: the 3D view, the city levels' portal culling and the open
+  levels' terrain are widened with the window; the HUD is anchored to the
+  sides; snow and the full-screen wipes cover the wide picture. Cutscenes
+  stay 4:3 (their sets are only built as far as the 4:3 camera sees).
+- **Audio**: MusyX through RSPRecomp, with headroom and a limiter so loud
+  scenes don't crackle.
+- **Saves**: the cartridge's EEPROM, and Controller Paks as `.mpk` files;
+  Rumble Pak; local multiplayer.
+- **Speed**: loads about 6x faster than first, and the game's threads no
+  longer spin a CPU core while they wait.
+- **Portable by default** for new installs, and command-line options for
+  every setting, the ROM and going straight into the game (`--help`).
 
-## Not working yet
+## Known issues
 
-- **Graphics**: RT64 now recognises Factor 5's graphics microcode and runs
-  its display lists: 2D screens and 3D models show. The terrain and
-  backgrounds the microcode generates itself (commands 05/BE) aren't drawn
-  yet.
-- **Audio**: MusyX's code is longer than the RSP's instruction memory and
-  wraps around; the RSPRecomp config needs that layout and its jump targets.
-- **Saves**: EEPROM through the runtime (AllowAll, 16 Kbit); not tried yet.
-
-## Planned from the start (lessons from the earlier ports)
-
-- **High framerates**: interpolation needs stable matrix IDs from the start,
-  and the game's frame-time math checked for the truncation problems the
-  BattleTanx port had (`(int)step` going to 0). The game runs a variable
-  timestep, so frame pacing and the clock rate matter more here.
-- **Widescreen**: the 3D view and culling to extend with the aspect ratio,
-  the HUD anchored to the screen edges, nothing important pushed off screen.
+- **Frame rate**: the game runs at its own 30 fps. RT64's generated frames
+  in between show the game's frames as made; moving objects smoothly in
+  between (the experimental mode on F10) isn't good enough yet. This
+  engine gives RT64 one finished matrix per object, so objects have to be
+  identified from the game's own scene data; that's the work in progress.
+- Objects reported as culled at the very edges of a wide screen (not yet
+  reproduced).
+- Distant objects can appear mid-screen (likely the game's own draw
+  distance; to compare with an emulator).
+- Menus after quitting a mission reported slow on one machine (not
+  reproduced).
+- The graphics microcode is interpreted: about 4-5 ms of CPU per frame.
 
 ## Next
 
-1. Graphics: the terrain and background commands (05/BE) of Factor 5's
-   microcode.
-2. MusyX audio microcode layout.
-3. The in-game quit prompt and UI (the per-frame UI pump).
-4. Title screen, menus and the first mission.
+1. Frame interpolation built on the game's own object identities.
+2. The open reports above, from captures (F12 saves a frame to replay).
 
 ## Where things are
 
@@ -64,9 +59,9 @@ tooling as the BattleTanx: Global Assault port.
 | `syms/rom_info.md` | ROM identification and memory layout |
 | `syms/libultra.txt` | libultra names and where they are |
 | `src/main/` | Frontend: window, audio, input, config, crash reporting |
-| `src/game/` | Game-specific code: paged segment, OS setup, runtime shims |
+| `src/game/` | Game-specific code: paged segment, OS setup, widescreen, audio, hooks |
 | `patches/` | Whole-function replacements compiled for MIPS (none yet) |
 | `assets/` | UI font, icons and their licenses |
 | `icons/` | App icon (`tools/make_app_icon.py`) |
-| `lib-patches/` | Patches applied to submodules at configure time |
+| `lib-patches/` | Patches applied to submodules at configure time (RT64's Factor 5 support is `lib-patches/rt64/`) |
 | `tools/` | ROM splitting, symbol generation, analysis, release packaging |

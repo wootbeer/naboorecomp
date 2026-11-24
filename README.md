@@ -11,10 +11,13 @@ the BattleTanx: Global Assault port.
 Unofficial, and not affiliated with the rights holders. **No game data is
 included.** You need your own dump of the game to build or play this.
 
-**Status: early work in progress, not playable yet.** The game's code is
-recompiled and runs into its title screen; the renderer now understands
-Factor 5's custom graphics microcode, but the picture isn't right yet. See
-[PROGRESS.md](PROGRESS.md).
+**Status: playable, work in progress.** The game boots, its menus and
+missions play through, with widescreen, sound, saves and controller support.
+There are known rough edges (see [PROGRESS.md](PROGRESS.md)), and there are
+no releases yet: to play, build it yourself ([BUILDING.md](BUILDING.md)).
+
+Development happens on the `claude/gracious-brown-fbggpp` branch;
+[STATUS.md](STATUS.md) is the detailed log of every round of work.
 
 ## Game Files
 You need your own data files: Star Wars Episode I - Battle for Naboo (USA).n64
@@ -53,7 +56,7 @@ See [BUILDING.md](BUILDING.md).
 
 ## Issues and Limitations
 
-- Not playable yet (see PROGRESS.md).
+- See [PROGRESS.md](PROGRESS.md) for what's known not to work yet.
 - Please see the "Issues" section in GitHub.
 
 ## Credits
